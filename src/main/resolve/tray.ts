@@ -346,13 +346,21 @@ export const buildContextMenu = async (): Promise<Menu> => {
       click: async (item): Promise<void> => {
         const enable = item.checked
         try {
+          let modeChanged = false
           if (enable) {
-            await patchControlledConfigSafely({ tun: { enable }, dns: { enable: true } })
+            modeChanged = await patchControlledConfigSafely({
+              tun: { enable },
+              dns: { enable: true }
+            })
           } else {
-            await patchControlledConfigSafely({ tun: { enable } })
+            modeChanged = await patchControlledConfigSafely({ tun: { enable } })
           }
           mainWindow?.webContents.send('controledMihomoConfigUpdated')
           floatingWindow?.webContents.send('controledMihomoConfigUpdated')
+          if (modeChanged) {
+            mainWindow?.webContents.send('appConfigUpdated')
+            floatingWindow?.webContents.send('appConfigUpdated')
+          }
           await restartCore()
         } catch {
           // ignore

@@ -13,15 +13,14 @@ import { setSysDns } from '../service/api'
 import {
   acquireMihomoDnsLease,
   ensureMihomoDnsHelperDaemon,
-  isMihomoDnsHelperAvailable,
-  isMihomoDnsHelperSocketPresent,
+  getMihomoDnsLeaseStatus,
   releaseMihomoDnsLease,
   reconcileMihomoDnsLease
 } from '../sys/dns-helper'
 import {
   decideDnsLeaseReconcile,
-  isDisablingMihomoListenerPatch,
-  parseDnsLeaseTarget
+  parseDnsLeaseTarget,
+  shouldClearMihomoSystemDnsMode
 } from '../sys/dns-helper-protocol'
 import { triggerSysProxy } from '../sys/sysproxy'
 import { appendAppLog } from '../utils/log'
@@ -193,16 +192,15 @@ export async function releaseMihomoSystemDNSLease(): Promise<void> {
  * before the controlled config is changed, so a failed restore keeps the
  * listener and its old configuration alive for safe recovery.
  */
-export async function patchControlledConfigSafely(patch: Partial<MihomoConfig>): Promise<void> {
+export async function patchControlledConfigSafely(patch: Partial<MihomoConfig>): Promise<boolean> {
   const currentConfig = await getAppConfig()
-  if (
-    isDisablingMihomoListenerPatch(patch) &&
-    currentConfig.macosSystemDnsMode === 'mihomo-listener'
-  ) {
+  const modeChanged = shouldClearMihomoSystemDnsMode(currentConfig.macosSystemDnsMode, patch)
+  if (modeChanged) {
     await releaseMihomoSystemDNSLease()
     await patchAppConfig({ macosSystemDnsMode: 'none' })
   }
   await patchControledMihomoConfig(patch)
+  return modeChanged
 }
 
 /** Reconcile an interrupted helper transaction without acquiring anything. */
@@ -210,17 +208,25 @@ export async function reconcileMihomoSystemDNSLease(): Promise<void> {
   if (process.platform !== 'darwin') return
   const appConfig = await getAppConfig()
   const listenerMode = appConfig.macosSystemDnsMode === 'mihomo-listener'
-  if (listenerMode) await ensureMihomoDnsHelperDaemon()
-  if (!isMihomoDnsHelperAvailable()) return
-  let status = await reconcileMihomoDnsLease()
-  // If app data was reset, the per-user token may no longer match the
-  // root-owned daemon token. A present socket proves this is an installed
-  // daemon recovery case (not the ordinary no-daemon startup no-op), so one
-  // explicit ensure rotates the token and lets us release a stale lease.
-  if (!listenerMode && !status.supported && isMihomoDnsHelperSocketPresent()) {
-    await ensureMihomoDnsHelperDaemon()
-    status = await reconcileMihomoDnsLease()
+  if (!listenerMode) {
+    // Disabled mode must never ask the helper to migrate/reacquire on a new
+    // primary service. A status query followed by a direct release is the
+    // only permitted cleanup; missing daemon/socket/auth is a quiet no-op.
+    const status = await getMihomoDnsLeaseStatus()
+    const decision = decideDnsLeaseReconcile('none', status)
+    if (decision === 'noop') return
+    if (decision === 'error') {
+      throw new Error(status.error || 'macOS DNS helper 检测到外部 DNS 冲突')
+    }
+    const released = await releaseMihomoDnsLease()
+    if (!released.supported || released.active || released.conflict || released.error) {
+      throw new Error(released.error || 'macOS DNS helper stale lease 无法安全释放')
+    }
+    return
   }
+
+  await ensureMihomoDnsHelperDaemon()
+  const status = await reconcileMihomoDnsLease()
   const decision = decideDnsLeaseReconcile(listenerMode ? 'mihomo-listener' : 'none', status)
   if (decision === 'noop') return
   if (decision === 'error') {

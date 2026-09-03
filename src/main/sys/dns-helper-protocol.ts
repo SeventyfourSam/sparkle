@@ -13,6 +13,8 @@ export interface DnsHelperStatus {
   version?: number
   /** Digest of the installed helper executable, independent of wire/schema version. */
   build_id?: string
+  /** The daemon rejected the presented credential; safe to repair by reinstalling. */
+  auth_failed?: boolean
   supported: boolean
   active: boolean
   healthy: boolean
@@ -39,6 +41,11 @@ export interface DnsLeaseState {
   watcherPid?: number
 }
 
+export interface DnsHelperAuthMaterial {
+  path: string
+  token: string
+}
+
 export type ParseDnsTargetResult =
   { ok: true; value: DnsLeaseTarget } | { ok: false; error: string }
 
@@ -50,11 +57,14 @@ export type DnsHelperInstallDecision = 'ready' | 'install'
  * it is not a reason to strand an existing v1 lease.
  */
 export function needsDnsHelperInstall(
-  existing: Pick<DnsHelperStatus, 'supported' | 'version' | 'build_id'> | undefined,
+  existing:
+    | Pick<DnsHelperStatus, 'supported' | 'version' | 'build_id' | 'auth_failed' | 'error'>
+    | undefined,
   packagedBuildId: string
 ): DnsHelperInstallDecision {
   if (
     existing?.supported &&
+    !existing.auth_failed &&
     existing.version === dnsHelperProtocolVersion &&
     existing.build_id === packagedBuildId
   ) {
@@ -66,12 +76,20 @@ export function needsDnsHelperInstall(
 /** Keep the privileged installer argument contract pure and testable. */
 export function buildDnsHelperInstallArgs(
   source: string,
-  authPath: string,
+  auth: DnsHelperAuthMaterial,
   uid: number,
   buildId: string
 ): string[] {
-  if (!path.isAbsolute(authPath) || path.basename(authPath) !== 'dns-helper-auth') {
+  if (
+    !auth ||
+    typeof auth.path !== 'string' ||
+    !path.isAbsolute(auth.path) ||
+    path.basename(auth.path) !== 'dns-helper-auth'
+  ) {
     throw new Error('DNS helper installer requires an absolute auth file path')
+  }
+  if (!/^[0-9a-f]{64}$/i.test(auth.token)) {
+    throw new Error('DNS helper installer requires a valid auth token')
   }
   return [
     'install',
@@ -79,7 +97,7 @@ export function buildDnsHelperInstallArgs(
     '--source',
     source,
     '--auth-file',
-    authPath,
+    auth.path,
     '--uid',
     String(uid),
     '--build-id',
@@ -95,8 +113,9 @@ export type DnsLeaseReconcileDecision = 'noop' | 'release' | 'error'
  */
 export function decideDnsLeaseReconcile(
   mode: 'none' | 'mihomo-listener',
-  status: Pick<DnsHelperStatus, 'supported' | 'active' | 'conflict' | 'error'>
+  status: Pick<DnsHelperStatus, 'supported' | 'active' | 'conflict' | 'error' | 'auth_failed'>
 ): DnsLeaseReconcileDecision {
+  if (status.auth_failed) return mode === 'mihomo-listener' ? 'error' : 'noop'
   if (!status.supported) return mode === 'mihomo-listener' ? 'error' : 'noop'
   if (status.conflict || status.error) return 'error'
   if (mode === 'none' && status.active) return 'release'
@@ -105,6 +124,13 @@ export function decideDnsLeaseReconcile(
 
 export function isDisablingMihomoListenerPatch(patch: Partial<MihomoConfig>): boolean {
   return patch.tun?.enable === false || patch.dns?.enable === false || patch.dns?.listen === ''
+}
+
+export function shouldClearMihomoSystemDnsMode(
+  mode: AppConfig['macosSystemDnsMode'],
+  patch: Partial<MihomoConfig>
+): boolean {
+  return mode === 'mihomo-listener' && isDisablingMihomoListenerPatch(patch)
 }
 
 /** Parse and constrain the only target accepted by the privileged helper. */

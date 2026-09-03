@@ -16,8 +16,11 @@ root-owned authentication material under
 `/var/root/Library/Application Support/Sparkle/dns-helper-auth`. The daemon
 does not read the mutable per-user application-data copy during boot, so reset
 data, FileVault timing, and app uninstall cannot strand a lease or cause a
-launchd restart loop. Sparkle rotates the root copy atomically during an
-explicit install/update. All lease mutations use a file lock plus one bounded
+launchd restart loop. The daemon reads the root credential for each request;
+missing or corrupt auth therefore reports machine-readable `auth_failed` to
+the app without preventing boot reconciliation. Sparkle rotates the root copy
+atomically only after stopping an old daemon during an explicit install/update.
+All lease mutations use a file lock plus one bounded
 SCPreferences transaction: the preferences are synchronized after locking,
 then read, compared, merged, committed, applied, and verified before unlock.
 The pending snapshot is written before mutation, and restore changes only the
@@ -33,12 +36,16 @@ cannot leave a dead non-53 resolver lease without a recovery process. Helper
 upgrade compares the packaged executable's SHA-256 build identity with daemon
 status; a mismatch or wire-version mismatch triggers one elevated install
 attempt. The installer hashes the exact opened executable before copying it,
-atomically replaces the root-owned executable/plist, and starts the same
-daemon; the v1 persisted lease remains readable and is reconciled by the new
-process. Uninstall restores the lease first and refuses to remove the daemon
+requires the source to be the canonical executable currently running the
+installer with non-writable bundle/resource ancestors, then atomically replaces
+the root-owned executable/plist and starts the same daemon; the v1 persisted
+lease remains readable and is reconciled by the new process. Uninstall restores the lease first and refuses to remove the daemon
 when a field-aware conflict prevents safe restoration. Normal status and
 release use the authenticated socket and do not prompt for administrator
-credentials.
+credentials. When the app mode is disabled, startup performs only a socket
+status/release cleanup and never migrates or acquires a lease. Target-change
+requests allow up to 20 seconds for the pre-probe, locked restore/apply
+transaction, and post-probe.
 
 `pnpm build:dns-helper -- --arch=arm64` and `--arch=x64` compile the Swift
 source with SystemConfiguration/CoreFoundation against macOS 10.15. The

@@ -137,7 +137,12 @@ import v8 from 'v8'
 import { getGistUrl } from '../resolve/gistApi'
 import { getIconDataURL, getImageDataURL } from './icon'
 import { startMonitor } from '../resolve/trafficMonitor'
-import { closeFloatingWindow, showContextMenu, showFloatingWindow } from '../resolve/floatingWindow'
+import {
+  closeFloatingWindow,
+  floatingWindow,
+  showContextMenu,
+  showFloatingWindow
+} from '../resolve/floatingWindow'
 import { getAppName } from '@uruhalushia/sparkle-native'
 import { showNotification } from './notification'
 import { getUserAgent } from './userAgent'
@@ -261,6 +266,15 @@ async function normalizeServiceModePatch(patch: Partial<AppConfig>): Promise<Par
   }
 }
 
+async function patchControlledConfigFromRenderer(patch: Partial<MihomoConfig>): Promise<boolean> {
+  const modeChanged = await patchControlledConfigSafely(patch)
+  if (modeChanged) {
+    mainWindow?.webContents.send('appConfigUpdated')
+    floatingWindow?.webContents.send('appConfigUpdated')
+  }
+  return modeChanged
+}
+
 export function registerIpcMainHandlers(): void {
   ipcMain.handle('mihomoVersion', ipcErrorWrapper(mihomoVersion))
   ipcMain.handle('mihomoConfig', ipcErrorWrapper(mihomoConfig))
@@ -308,7 +322,7 @@ export function registerIpcMainHandlers(): void {
     ipcErrorWrapper(getControledMihomoConfig)(force)
   )
   ipcMain.handle('patchControledMihomoConfig', (_e, config) =>
-    ipcErrorWrapper(patchControlledConfigSafely)(config)
+    ipcErrorWrapper(patchControlledConfigFromRenderer)(config)
   )
   ipcMain.handle('getProfileConfig', (_e, force) => ipcErrorWrapper(getProfileConfig)(force))
   ipcMain.handle('setProfileConfig', (_e, config) => ipcErrorWrapper(setProfileConfig)(config))

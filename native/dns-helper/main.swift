@@ -47,6 +47,7 @@ private struct TargetStatus: Codable {
 private struct Status: Codable {
     var version: Int
     var build_id: String?
+    var auth_failed: Bool?
     var supported: Bool
     var active: Bool
     var healthy: Bool
@@ -72,6 +73,11 @@ private struct Snapshot {
     let configuration: [String: Any]?
     let addresses: [String]
     let port: Int?
+}
+
+private struct FileIdentity: Equatable {
+    let device: UInt64
+    let inode: UInt64
 }
 
 private enum HelperError: LocalizedError {
@@ -112,11 +118,13 @@ private func status(
     active: Bool = false,
     healthy: Bool = false,
     conflict: Bool = false,
+    authFailed: Bool = false,
     error: String? = nil
 ) -> Status {
     Status(
         version: helperWireVersion,
         build_id: daemonBuildID,
+        auth_failed: authFailed ? true : nil,
         supported: true,
         active: active,
         healthy: healthy,
@@ -200,6 +208,22 @@ private func ensureStateDirectory() throws {
     guard chmod(stateDirectory, mode_t(0o700)) == 0 else {
         throw HelperError.transaction("无法保护 DNS helper 状态目录")
     }
+    var info = stat()
+    guard lstat(stateDirectory, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+          info.st_uid == 0, (info.st_mode & 0o077) == 0 else {
+        throw HelperError.transaction("DNS helper 状态目录权限不安全")
+    }
+}
+
+private func syncDirectory(_ path: String) throws {
+    let descriptor = open(path, O_RDONLY | O_DIRECTORY)
+    guard descriptor >= 0 else {
+        throw HelperError.transaction("无法持久化 DNS helper 目录")
+    }
+    defer { close(descriptor) }
+    guard fsync(descriptor) == 0 else {
+        throw HelperError.transaction("无法持久化 DNS helper 目录")
+    }
 }
 
 private func readState() throws -> LeaseState? {
@@ -213,6 +237,8 @@ private func readState() throws -> LeaseState? {
 }
 
 private func writeState(_ state: LeaseState) throws {
+    // Durability invariant: the pending/active marker and root auth material
+    // must reach stable storage before a DNS mutation can outlive recovery.
     try ensureStateDirectory()
     let data = try JSONEncoder().encode(state)
     let temporaryPath = stateFile + ".tmp-" + UUID().uuidString
@@ -228,9 +254,10 @@ private func writeState(_ state: LeaseState) throws {
         }
         return true
     }
-    _ = fsync(descriptor)
+    let permissionResult = fchmod(descriptor, mode_t(0o600)) == 0
+    let syncResult = fsync(descriptor)
     close(descriptor)
-    guard writeResult, chmod(temporaryPath, mode_t(0o600)) == 0 else {
+    guard writeResult, permissionResult, syncResult == 0 else {
         try? FileManager.default.removeItem(atPath: temporaryPath)
         throw HelperError.transaction("无法保护 DNS helper 状态文件")
     }
@@ -238,14 +265,13 @@ private func writeState(_ state: LeaseState) throws {
         try? FileManager.default.removeItem(atPath: temporaryPath)
         throw HelperError.transaction("无法原子保存 DNS helper 状态")
     }
-    guard chmod(stateFile, mode_t(0o600)) == 0 else {
-        throw HelperError.transaction("无法保护 DNS helper 状态文件")
-    }
+    try syncDirectory(stateDirectory)
 }
 
 private func removeState() throws {
     if FileManager.default.fileExists(atPath: stateFile) {
         try FileManager.default.removeItem(atPath: stateFile)
+        try syncDirectory(stateDirectory)
     }
 }
 
@@ -421,21 +447,34 @@ private func restoreStateLocked(
     }
     let before = try snapshot(context, service: service)
     let original = try plistDictionary(state.originalConfiguration)
-    guard owned(before, target: state.target) else {
-        // A commit can fail before changing anything. Treat an already
-        // restored dictionary as an idempotent rollback, while refusing to
-        // guess when the target fields are only partially changed.
-        if restored(before, original: original) {
-            if stopWatch { stopWatcher(state) }
-            try removeState()
-            return
-        }
-        throw HelperError.conflict("DNS 目标字段已被外部配置替换，未覆盖外部更改")
-    }
-    let merged = mergedConfiguration(current: before.configuration, original: original)
+    let fieldsOwned = owned(before, target: state.target)
+    let fieldsRestored = restored(before, original: original)
     // If an external actor disabled the protocol while our fields stayed
     // intact, preserve that explicit change instead of re-enabling it.
     let restoreEnabled = before.enabled ? state.protocolEnabled : false
+    if !fieldsOwned {
+        // A commit can fail before changing anything. Treat an already
+        // restored dictionary as an idempotent rollback, but still undo a
+        // helper-owned protocol-enable transition when the fields happen to
+        // match the original snapshot already.
+        guard fieldsRestored else {
+            throw HelperError.conflict("DNS 目标字段已被外部配置替换，未覆盖外部更改")
+        }
+        if before.enabled != restoreEnabled {
+            try setConfigurationLocked(context, service: service, configuration: before.configuration, enabled: restoreEnabled)
+            guard let verifiedService = context.service(withID: state.serviceID) else {
+                throw HelperError.conflict("恢复后 DNS 网络服务已不存在")
+            }
+            let after = try snapshot(context, service: verifiedService)
+            guard restored(after, original: original), after.enabled == restoreEnabled else {
+                throw HelperError.transaction("DNS 恢复验证失败")
+            }
+        }
+        if stopWatch { stopWatcher(state) }
+        try removeState()
+        return
+    }
+    let merged = mergedConfiguration(current: before.configuration, original: original)
     try setConfigurationLocked(context, service: service, configuration: merged, enabled: restoreEnabled)
     guard let verifiedService = context.service(withID: state.serviceID) else {
         throw HelperError.conflict("恢复后 DNS 网络服务已不存在")
@@ -758,9 +797,10 @@ private func writePrivateDataAtomically(_ data: Data, path: String, mode: mode_t
         }
         return true
     }
-    _ = fsync(descriptor)
+    let permissionResult = fchmod(descriptor, mode) == 0 && fchown(descriptor, owner, group) == 0
+    let syncResult = fsync(descriptor)
     close(descriptor)
-    guard writeResult, chmod(temporaryPath, mode) == 0, chown(temporaryPath, owner, group) == 0 else {
+    guard writeResult, permissionResult, syncResult == 0 else {
         try? FileManager.default.removeItem(atPath: temporaryPath)
         throw HelperError.transaction("无法保护 DNS helper 私有文件")
     }
@@ -768,9 +808,7 @@ private func writePrivateDataAtomically(_ data: Data, path: String, mode: mode_t
         try? FileManager.default.removeItem(atPath: temporaryPath)
         throw HelperError.transaction("无法原子保存 DNS helper 私有文件")
     }
-    guard chmod(path, mode) == 0, chown(path, owner, group) == 0 else {
-        throw HelperError.transaction("无法保护 DNS helper 私有文件")
-    }
+    try syncDirectory(URL(fileURLWithPath: path).deletingLastPathComponent().path)
 }
 
 private func writeRootAuthAtomically(_ token: String) throws {
@@ -804,23 +842,92 @@ private func plistEscape(_ value: String) -> String {
         .replacingOccurrences(of: "'", with: "&apos;")
 }
 
-private func validPackagedSource(_ path: String?) throws -> String {
+private func canonicalPath(_ path: String) throws -> String {
+    try path.withCString { value in
+        guard let resolved = realpath(value, nil) else {
+            throw HelperError.invalid("DNS helper 路径无法解析")
+        }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+}
+
+private func currentExecutablePath() throws -> String {
+    // _NSGetExecutablePath is provided by Darwin and cannot be redirected by
+    // an argv[0] lookalike supplied to the privileged installer.
+    var size: UInt32 = 4096
+    while size <= 1024 * 1024 {
+        var buffer = [Int8](repeating: 0, count: Int(size))
+        let result = buffer.withUnsafeMutableBufferPointer { pointer in
+            _NSGetExecutablePath(pointer.baseAddress!, &size)
+        }
+        if result == 0 {
+            return try canonicalPath(String(cString: buffer))
+        }
+        size = max(size * 2, size + 1)
+    }
+    throw HelperError.invalid("DNS helper 当前可执行文件路径过长")
+}
+
+private func fileIdentity(_ descriptor: Int32) throws -> FileIdentity {
+    var info = stat()
+    guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+        throw HelperError.invalid("DNS helper 当前可执行文件不可验证")
+    }
+    return FileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
+}
+
+private func pathIdentity(_ path: String) throws -> FileIdentity {
+    let descriptor = open(path, O_RDONLY | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw HelperError.invalid("DNS helper 当前可执行文件不可打开") }
+    defer { close(descriptor) }
+    return try fileIdentity(descriptor)
+}
+
+private func validateSourcePermissions(_ path: String, uid: uid_t, packaged: Bool) throws {
+    var cursor = URL(fileURLWithPath: path)
+    while true {
+        var info = stat()
+        guard lstat(cursor.path, &info) == 0 else {
+            throw HelperError.invalid("DNS helper 源路径无法验证")
+        }
+        guard (info.st_mode & 0o022) == 0, (info.st_uid == 0 || info.st_uid == uid) else {
+            throw HelperError.invalid("DNS helper 源路径权限不安全")
+        }
+        if cursor.path != path {
+            guard (info.st_mode & S_IFMT) == S_IFDIR else {
+                throw HelperError.invalid("DNS helper 源路径包含非目录组件")
+            }
+        }
+        if packaged && cursor.lastPathComponent.hasSuffix(".app") { break }
+        let parent = cursor.deletingLastPathComponent()
+        if parent.path == cursor.path { break }
+        cursor = parent
+    }
+}
+
+private func validPackagedSource(_ path: String?, executablePath: String, uid: uid_t) throws -> String {
     guard let path, path.hasPrefix("/"),
           URL(fileURLWithPath: path).lastPathComponent == "sparkle-dns-helper",
           URL(fileURLWithPath: path).standardizedFileURL.path == path,
           !path.contains("/../") else {
         throw HelperError.invalid("DNS helper 源文件路径无效")
     }
+    let canonical = try canonicalPath(path)
+    guard canonical == executablePath else {
+        throw HelperError.invalid("DNS helper 源文件必须是当前运行的 Sparkle helper")
+    }
     let components = URL(fileURLWithPath: path).pathComponents
     let packagedSuffix = ["Contents", "Resources", "files", "sparkle-dns-helper"]
     let developmentSuffix = ["extra", "files", "sparkle-dns-helper"]
-    let allowed = components.suffix(packagedSuffix.count).elementsEqual(packagedSuffix) ||
-        components.suffix(developmentSuffix.count).elementsEqual(developmentSuffix)
+    let packaged = components.suffix(packagedSuffix.count).elementsEqual(packagedSuffix)
+    let allowed = packaged || components.suffix(developmentSuffix.count).elementsEqual(developmentSuffix)
     guard allowed else { throw HelperError.invalid("DNS helper 源文件不在 Sparkle 资源目录") }
     var info = stat()
     guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, (info.st_mode & S_IXUSR) != 0 else {
         throw HelperError.invalid("DNS helper 源文件不可执行")
     }
+    try validateSourcePermissions(path, uid: uid, packaged: packaged)
     return path
 }
 
@@ -831,12 +938,17 @@ private func validateBuildID(_ value: String?) throws -> String {
     return value.lowercased()
 }
 
-private func readPackagedExecutable(_ path: String, expectedBuildID: String) throws -> Data {
-    let descriptor = open(path, O_RDONLY)
+private func readPackagedExecutable(
+    _ path: String,
+    expectedBuildID: String,
+    expectedIdentity: FileIdentity
+) throws -> Data {
+    let descriptor = open(path, O_RDONLY | O_NOFOLLOW)
     guard descriptor >= 0 else { throw HelperError.invalid("无法打开 DNS helper 打包源文件") }
     defer { close(descriptor) }
+    let identity = try fileIdentity(descriptor)
     var info = stat()
-    guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+    guard identity == expectedIdentity, fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
           (info.st_mode & S_IXUSR) != 0 else {
         throw HelperError.invalid("DNS helper 打包源文件不可执行")
     }
@@ -885,6 +997,18 @@ private func daemonIsLoaded() -> Bool {
     }
 }
 
+private func stopDaemonBeforeReplacement() throws {
+    // Bootout is intentionally attempted even when launchctl's prior print
+    // raced a just-starting daemon. Never rotate root auth while an old
+    // process could still be serving the socket.
+    try runLaunchctl(["bootout", "system/\(launchDaemonLabel)"], allowFailure: true)
+    for _ in 0..<20 {
+        if !daemonIsLoaded() { return }
+        usleep(preferencesLockRetryMicroseconds)
+    }
+    throw HelperError.transaction("旧 DNS helper 未能在更新前停止")
+}
+
 private func writeLaunchDaemonPlist(uid: uid_t, buildID: String) throws {
     let xml = """
     <?xml version="1.0" encoding="UTF-8"?>
@@ -916,48 +1040,55 @@ private func writeLaunchDaemonPlist(uid: uid_t, buildID: String) throws {
     </plist>
     """
     let temporaryPath = launchDaemonPath + ".tmp-" + UUID().uuidString
-    try Data(xml.utf8).write(to: URL(fileURLWithPath: temporaryPath), options: [])
-    guard chmod(temporaryPath, mode_t(0o644)) == 0, chown(temporaryPath, 0, 0) == 0 else {
-        try? FileManager.default.removeItem(atPath: temporaryPath)
-        throw HelperError.transaction("无法保护 DNS helper launchd 配置")
-    }
+    try writePrivateDataAtomically(
+        Data(xml.utf8),
+        path: temporaryPath,
+        mode: mode_t(0o644),
+        owner: 0,
+        group: 0
+    )
     guard rename(temporaryPath, launchDaemonPath) == 0 else {
         try? FileManager.default.removeItem(atPath: temporaryPath)
         throw HelperError.transaction("无法原子安装 DNS helper launchd 配置")
     }
+    try syncDirectory(URL(fileURLWithPath: launchDaemonPath).deletingLastPathComponent().path)
 }
 
 private func installDaemon(source: String?, authFile: String?, uidValue: String?, buildID: String?) throws -> Status {
     try requireRoot()
-    let sourcePath = try validPackagedSource(source)
     let uid = try validateUID(uidValue)
+    let executablePath = try currentExecutablePath()
+    let executableIdentity = try pathIdentity(executablePath)
+    let sourcePath = try validPackagedSource(source, executablePath: executablePath, uid: uid)
     let authPath = try validateAuthFile(authFile, uid: uid)
     let expectedBuildID = try validateBuildID(buildID)
     // Open, fstat, copy, and hash one exact descriptor. This avoids the old
     // path-reopen TOCTOU and rejects a swapped lookalike source.
-    let sourceData = try readPackagedExecutable(sourcePath, expectedBuildID: expectedBuildID)
+    let sourceData = try readPackagedExecutable(
+        sourcePath,
+        expectedBuildID: expectedBuildID,
+        expectedIdentity: executableIdentity
+    )
     let token = try readValidatedAuthFile(authPath, owner: uid)
     try ensureStateDirectory()
-    try writeRootAuthAtomically(token)
 
     do {
         // Stop the old daemon before replacing its root-owned executable.  Its
         // persisted lease remains in place; the new daemon reconciles it at boot.
-        if daemonIsLoaded() {
-            try runLaunchctl(["bootout", "system/\(launchDaemonLabel)"])
-        }
+        try stopDaemonBeforeReplacement()
         unlink(socketPath)
+        // Rotate root auth only after the old process has stopped. The daemon
+        // reads this file for each request, so a failed install can recover
+        // without leaving a live process on an obsolete credential.
+        try writeRootAuthAtomically(token)
 
         let temporaryPath = installedHelperPath + ".tmp-" + UUID().uuidString
-        try writePrivateDataAtomically(sourceData, path: temporaryPath, mode: mode_t(0o700), owner: 0, group: 0)
-        guard chmod(temporaryPath, mode_t(0o755)) == 0 else {
-            try? FileManager.default.removeItem(atPath: temporaryPath)
-            throw HelperError.transaction("无法保护已安装的 DNS helper")
-        }
+        try writePrivateDataAtomically(sourceData, path: temporaryPath, mode: mode_t(0o755), owner: 0, group: 0)
         guard rename(temporaryPath, installedHelperPath) == 0 else {
             try? FileManager.default.removeItem(atPath: temporaryPath)
             throw HelperError.transaction("无法原子更新已安装的 DNS helper")
         }
+        try syncDirectory(URL(fileURLWithPath: installedHelperPath).deletingLastPathComponent().path)
         try writeLaunchDaemonPlist(uid: uid, buildID: expectedBuildID)
         daemonBuildID = expectedBuildID
         try runLaunchctl(["bootstrap", "system", launchDaemonPath])
@@ -1038,11 +1169,14 @@ private func writeSocketJSON(_ value: some Encodable, to descriptor: Int32) {
     }
 }
 
-private func handleDaemonRequest(_ data: Data, auth: String) -> Status {
+private func handleDaemonRequest(_ data: Data) -> Status {
     do {
         let request = try JSONDecoder().decode(DaemonRequest.self, from: data)
-        guard constantTimeEqual(request.auth, auth) else {
-            return status(error: "DNS helper 请求认证失败")
+        guard let currentAuth = try? readRootAuth() else {
+            return status(authFailed: true, error: "DNS helper root 认证材料不可用")
+        }
+        guard constantTimeEqual(request.auth, currentAuth) else {
+            return status(authFailed: true, error: "DNS helper 请求认证失败")
         }
         switch request.command {
         case "acquire":
@@ -1110,7 +1244,6 @@ private func daemon(_ authFile: String?, uidValue: String?, buildID: String?) th
     guard authFile == rootAuthFile else { throw HelperError.invalid("daemon 认证材料必须来自 root 私有路径") }
     let uid = try validateUID(uidValue)
     daemonBuildID = try validateBuildID(buildID)
-    let auth = try readRootAuth()
     let descriptor = try daemonSocket()
     guard chown(socketPath, uid, 0) == 0 else {
         close(descriptor)
@@ -1133,7 +1266,7 @@ private func daemon(_ authFile: String?, uidValue: String?, buildID: String?) th
         let client = accept(descriptor, nil, nil)
         guard client >= 0 else { continue }
         if let data = readSocketLine(client) {
-            let response = (try? withLeaseLock { handleDaemonRequest(data, auth: auth) }) ?? status(error: "DNS helper 租约锁定失败")
+            let response = (try? withLeaseLock { handleDaemonRequest(data) }) ?? status(error: "DNS helper 租约锁定失败")
             writeSocketJSON(response, to: client)
         }
         close(client)

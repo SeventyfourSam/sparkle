@@ -61,10 +61,14 @@ export async function registerShortcut(
         const { tun } = await getControledMihomoConfig()
         const enable = tun?.enable ?? false
         try {
+          let modeChanged = false
           if (!enable) {
-            await patchControlledConfigSafely({ tun: { enable: !enable }, dns: { enable: true } })
+            modeChanged = await patchControlledConfigSafely({
+              tun: { enable: !enable },
+              dns: { enable: true }
+            })
           } else {
-            await patchControlledConfigSafely({ tun: { enable: !enable } })
+            modeChanged = await patchControlledConfigSafely({ tun: { enable: !enable } })
           }
           await restartCore()
           void showNotification({
@@ -72,6 +76,7 @@ export async function registerShortcut(
           })
           mainWindow?.webContents.send('controledMihomoConfigUpdated')
           floatingWindow?.webContents.send('appConfigUpdated')
+          if (modeChanged) mainWindow?.webContents.send('appConfigUpdated')
         } catch {
           // ignore
         } finally {

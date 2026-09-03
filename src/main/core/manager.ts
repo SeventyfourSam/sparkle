@@ -556,7 +556,13 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
 
                 if (isTunPermissionError(logLine)) {
                   try {
-                    await patchControlledConfigSafely({ tun: { enable: false } })
+                    const modeChanged = await patchControlledConfigSafely({
+                      tun: { enable: false }
+                    })
+                    if (modeChanged) {
+                      mainWindow?.webContents.send('appConfigUpdated')
+                      ipcMain.emit('updateFloatingWindow')
+                    }
                   } catch (error) {
                     await appendAppLog(`[Manager]: failed to safely disable Tun, ${error}\n`)
                   }

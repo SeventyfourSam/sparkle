@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
 import test from 'node:test'
+import os from 'node:os'
+import path from 'node:path'
 import {
   buildDnsHelperInstallArgs,
   decideDnsLeaseReconcile,
@@ -9,8 +12,10 @@ import {
   nextAcquireAction,
   parseDnsLeaseTarget,
   restoreOwnedDnsFields,
+  shouldClearMihomoSystemDnsMode,
   type DnsLeaseState
 } from './dns-helper-protocol'
+import { ensureDnsHelperAuthFile } from './dns-helper-auth'
 
 test('accepts only loopback non-53 DNS lease targets', () => {
   assert.deepEqual(parseDnsLeaseTarget('127.0.0.1:1053'), {
@@ -82,11 +87,12 @@ test('restore merges only Sparkle-owned fields', () => {
 test('installer receives the auth file path, never the token value', () => {
   const authPath = '/Users/test/Library/Application Support/Sparkle/dns-helper-auth'
   const token = 'a'.repeat(64)
+  const auth = { path: authPath, token }
   const args = buildDnsHelperInstallArgs(
     '/Applications/Sparkle.app/Contents/Resources/files/sparkle-dns-helper',
-    authPath,
+    auth,
     501,
-    token
+    'b'.repeat(64)
   )
   const authIndex = args.indexOf('--auth-file')
   assert.equal(args[authIndex + 1], authPath)
@@ -95,12 +101,27 @@ test('installer receives the auth file path, never the token value', () => {
     () =>
       buildDnsHelperInstallArgs(
         '/Applications/Sparkle.app/Contents/Resources/files/sparkle-dns-helper',
-        token,
+        token as never,
         501,
-        token
+        'b'.repeat(64)
       ),
     /absolute auth file path/
   )
+})
+
+test('auth material producer returns a path and token as separate values', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'sparkle-dns-auth-'))
+  try {
+    const filePath = path.join(directory, 'dns-helper-auth')
+    const first = await ensureDnsHelperAuthFile(filePath)
+    assert.equal(first.path, filePath)
+    assert.match(first.token, /^[0-9a-f]{64}$/)
+    const second = await ensureDnsHelperAuthFile(filePath)
+    assert.deepEqual(second, first)
+    assert.notEqual(first.path, first.token)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('helper update decision separates wire compatibility from build identity', () => {
@@ -127,6 +148,26 @@ test('helper update decision separates wire compatibility from build identity', 
     ),
     'install'
   )
+  assert.equal(
+    needsDnsHelperInstall(
+      { supported: true, version: dnsHelperProtocolVersion, build_id: buildId, auth_failed: true },
+      buildId
+    ),
+    'install'
+  )
+  assert.equal(
+    needsDnsHelperInstall(
+      {
+        supported: true,
+        version: dnsHelperProtocolVersion,
+        build_id: buildId,
+        auth_failed: false,
+        error: 'transaction failed'
+      },
+      buildId
+    ),
+    'ready'
+  )
 })
 
 test('disabled reconcile is a no-op without a daemon and releases a stale lease', () => {
@@ -135,7 +176,18 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
       supported: false,
       active: false,
       conflict: false,
+      auth_failed: false,
       error: 'socket missing'
+    }),
+    'noop'
+  )
+  assert.equal(
+    decideDnsLeaseReconcile('none', {
+      supported: true,
+      active: false,
+      conflict: false,
+      auth_failed: true,
+      error: 'DNS helper root 认证材料不可用'
     }),
     'noop'
   )
@@ -144,6 +196,7 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
       supported: true,
       active: true,
       conflict: false,
+      auth_failed: false,
       error: undefined
     }),
     'release'
@@ -153,16 +206,46 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
       supported: false,
       active: false,
       conflict: false,
+      auth_failed: false,
       error: 'daemon missing'
     }),
     'error'
   )
+  assert.equal(
+    decideDnsLeaseReconcile('mihomo-listener', {
+      supported: true,
+      active: false,
+      conflict: false,
+      auth_failed: true,
+      error: 'DNS helper 请求认证失败'
+    }),
+    'error'
+  )
+  assert.equal(
+    decideDnsLeaseReconcile('mihomo-listener', {
+      supported: true,
+      active: false,
+      conflict: false,
+      auth_failed: false,
+      error: 'DNS helper transaction failed'
+    }),
+    'error'
+  )
+  assert.equal(
+    decideDnsLeaseReconcile('none', {
+      supported: true,
+      active: true,
+      conflict: false,
+      auth_failed: true,
+      error: 'DNS helper 请求认证失败'
+    }),
+    'noop'
+  )
 })
 
 test('controlled config disabling patches are lifecycle-routed', async () => {
-  const { isDisablingMihomoListenerPatch } = await import('./dns-helper-protocol')
-  assert.equal(isDisablingMihomoListenerPatch({ tun: { enable: false } }), true)
-  assert.equal(isDisablingMihomoListenerPatch({ dns: { enable: false } }), true)
-  assert.equal(isDisablingMihomoListenerPatch({ dns: { listen: '' } }), true)
-  assert.equal(isDisablingMihomoListenerPatch({ tun: { enable: true } }), false)
+  assert.equal(shouldClearMihomoSystemDnsMode('mihomo-listener', { tun: { enable: false } }), true)
+  assert.equal(shouldClearMihomoSystemDnsMode('mihomo-listener', { dns: { enable: false } }), true)
+  assert.equal(shouldClearMihomoSystemDnsMode('mihomo-listener', { dns: { listen: '' } }), true)
+  assert.equal(shouldClearMihomoSystemDnsMode('none', { tun: { enable: false } }), false)
 })

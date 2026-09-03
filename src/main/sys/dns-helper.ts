@@ -1,27 +1,29 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { accessSync, constants, existsSync } from 'node:fs'
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createConnection } from 'node:net'
 import { dnsHelperPath, dataDir } from '../utils/dirs'
 import { execWithElevationOutput } from '../utils/elevation'
 import {
   buildDnsHelperInstallArgs,
+  type DnsHelperAuthMaterial,
   dnsHelperProtocolVersion,
   needsDnsHelperInstall,
   parseDnsLeaseTarget,
   type DnsHelperStatus
 } from './dns-helper-protocol'
+import { ensureDnsHelperAuthFile } from './dns-helper-auth'
 
 export type { DnsHelperStatus, DnsLeaseTarget } from './dns-helper-protocol'
 export { parseDnsLeaseTarget } from './dns-helper-protocol'
 
 const helperSocketPath = '/var/run/sparkle-dns-helper.sock'
 const helperAuthFileName = 'dns-helper-auth'
-// A request can include bounded UDP+TCP DNS probes and a SystemConfiguration
-// commit. Keep enough headroom that a healthy helper is not mistaken for a
-// dead one during a normal network transition.
-const helperRequestTimeout = 12000
+// Target changes can include a pre-probe, old-service restore, new-service
+// transaction, and post-probe. Keep conservative headroom so a live root
+// transaction cannot outlast the client timeout and appear misleadingly dead.
+const helperRequestTimeout = 20000
 
 let acquireInFlight: Promise<DnsHelperStatus> | undefined
 let releaseInFlight: Promise<DnsHelperStatus> | undefined
@@ -75,25 +77,8 @@ function parseHelperOutput(output: string): DnsHelperStatus {
   throw new Error('Sparkle macOS DNS helper 返回了无法识别的状态')
 }
 
-async function ensureAuthFile(): Promise<string> {
-  const filePath = helperAuthPath()
-  await mkdir(dataDir(), { recursive: true, mode: 0o700 })
-  try {
-    const existing = (await readFile(filePath, 'utf8')).trim()
-    if (/^[0-9a-f]{64}$/i.test(existing)) {
-      await chmod(filePath, 0o600)
-      return filePath
-    }
-  } catch {
-    // Create the token below.
-  }
-
-  const token = randomBytes(32).toString('hex')
-  const temporaryPath = `${filePath}.tmp-${process.pid}-${Date.now()}`
-  await writeFile(temporaryPath, `${token}\n`, { mode: 0o600, flag: 'wx' })
-  await chmod(temporaryPath, 0o600)
-  await rename(temporaryPath, filePath)
-  return filePath
+async function ensureAuthFile(): Promise<DnsHelperAuthMaterial> {
+  return ensureDnsHelperAuthFile(helperAuthPath())
 }
 
 async function packagedHelperBuildId(): Promise<string> {
@@ -186,12 +171,12 @@ export async function ensureMihomoDnsHelperDaemon(): Promise<DnsHelperStatus> {
       return existing as DnsHelperStatus
     }
 
-    const authFile = await ensureAuthFile()
+    const auth = await ensureAuthFile()
     const uid = process.getuid?.()
     if (!uid || uid <= 0) throw new Error('无法确定当前 macOS 应用用户')
     const output = await execWithElevationOutput(
       dnsHelperPath(),
-      buildDnsHelperInstallArgs(dnsHelperPath(), authFile, uid, buildId)
+      buildDnsHelperInstallArgs(dnsHelperPath(), auth, uid, buildId)
     )
     const installed = validateDaemonStatus(parseHelperOutput(output))
     if (installed.error) throw new Error(installed.error)
