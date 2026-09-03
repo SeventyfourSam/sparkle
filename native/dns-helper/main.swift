@@ -494,6 +494,148 @@ private func restoreState(_ state: LeaseState, stopWatch: Bool = true) throws {
     }
 }
 
+private enum DNSResponseValidation: Equatable {
+    case valid
+    case truncated
+}
+
+private enum DNSQueryTransport {
+    case udp
+    case tcp
+}
+
+private let stableDNSQueryID: UInt16 = 0x5350
+private let stableDNSQuestion = Data([
+    0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d,
+    0x00, 0x00, 0x01, 0x00, 0x01
+])
+
+private func readDNSUInt16(_ data: Data, at offset: Int) -> UInt16? {
+    guard offset >= 0, offset + 1 < data.count else { return nil }
+    return UInt16(data[offset]) << 8 | UInt16(data[offset + 1])
+}
+
+private func appendDNSUInt16(_ value: UInt16, to data: inout Data) {
+    data.append(UInt8(value >> 8))
+    data.append(UInt8(value & 0xff))
+}
+
+private func skipDNSName(_ data: Data, from offset: Int) -> Int? {
+    guard offset >= 0, offset < data.count else { return nil }
+    var cursor = offset
+    var labels = 0
+    while cursor < data.count, labels < 128 {
+        let length = Int(data[cursor])
+        if length == 0 { return cursor + 1 }
+        if length & 0xc0 == 0xc0 {
+            guard cursor + 1 < data.count else { return nil }
+            let pointer = (length & 0x3f) << 8 | Int(data[cursor + 1])
+            guard pointer >= 12, pointer < data.count else { return nil }
+            return cursor + 2
+        }
+        guard length <= 63, cursor + 1 + length <= data.count else { return nil }
+        cursor += 1 + length
+        labels += 1
+    }
+    return nil
+}
+
+private func skipDNSResourceRecord(_ data: Data, from offset: Int) -> Int? {
+    guard let nameEnd = skipDNSName(data, from: offset),
+          let dataLength = readDNSUInt16(data, at: nameEnd + 8) else { return nil }
+    let end = nameEnd + 10 + Int(dataLength)
+    guard end <= data.count else { return nil }
+    return end
+}
+
+/**
+ * Validate the actual DNS response for the stable A probe. UDP truncation is
+ * accepted only as a signal to require the independent TCP probe; TCP must
+ * contain a complete successful answer.
+ */
+private func validateDNSResponse(
+    _ data: Data?,
+    expectedID: UInt16,
+    transport: DNSQueryTransport
+) -> DNSResponseValidation? {
+    guard let data, data.count >= 12,
+          let identifier = readDNSUInt16(data, at: 0),
+          let flags = readDNSUInt16(data, at: 2),
+          let questionCount = readDNSUInt16(data, at: 4),
+          let answerCount = readDNSUInt16(data, at: 6) else { return nil }
+    guard identifier == expectedID,
+          flags & 0x8000 != 0,
+          flags & 0x7800 == 0,
+          flags & 0x0070 == 0,
+          flags & 0x000f == 0,
+          questionCount == 1,
+          let questionEnd = skipDNSName(data, from: 12),
+          questionEnd + 4 <= data.count,
+          data[12 ..< questionEnd + 4].elementsEqual(stableDNSQuestion),
+          readDNSUInt16(data, at: questionEnd) == 1,
+          readDNSUInt16(data, at: questionEnd + 2) == 1 else { return nil }
+
+    if flags & 0x0200 != 0 {
+        return transport == .udp ? .truncated : nil
+    }
+    guard answerCount > 0 else { return nil }
+    var cursor = questionEnd + 4
+    for _ in 0..<answerCount {
+        guard let next = skipDNSResourceRecord(data, from: cursor) else { return nil }
+        cursor = next
+    }
+    return .valid
+}
+
+private func makeDNSResponse(
+    identifier: UInt16 = stableDNSQueryID,
+    flags: UInt16 = 0x8180,
+    answerCount: UInt16 = 1
+) -> Data {
+    var response = Data()
+    appendDNSUInt16(identifier, to: &response)
+    appendDNSUInt16(flags, to: &response)
+    appendDNSUInt16(1, to: &response)
+    appendDNSUInt16(answerCount, to: &response)
+    appendDNSUInt16(0, to: &response)
+    appendDNSUInt16(0, to: &response)
+    response.append(stableDNSQuestion)
+    if answerCount > 0 {
+        // example.com. A IN 93.184.216.34, with the owner name compressed.
+        response.append(contentsOf: [
+            0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c,
+            0x00, 0x04, 0x5d, 0xb8, 0xd8, 0x22
+        ])
+    }
+    return response
+}
+
+private func runNativeSelfTest() throws -> Status {
+    guard validateDNSResponse(makeDNSResponse(), expectedID: stableDNSQueryID, transport: .udp) == .valid,
+          validateDNSResponse(makeDNSResponse(), expectedID: stableDNSQueryID, transport: .tcp) == .valid else {
+        throw HelperError.transaction("DNS response parser self-test success fixture failed")
+    }
+    for flags in [UInt16(0x8182), UInt16(0x8185), UInt16(0x8183)] {
+        guard validateDNSResponse(makeDNSResponse(flags: flags), expectedID: stableDNSQueryID, transport: .tcp) == nil else {
+            throw HelperError.transaction("DNS response parser self-test error fixture failed")
+        }
+    }
+    var malformedAnswer = makeDNSResponse()
+    malformedAnswer[40] = 5
+    guard validateDNSResponse(makeDNSResponse(answerCount: 0), expectedID: stableDNSQueryID, transport: .tcp) == nil,
+          validateDNSResponse(malformedAnswer, expectedID: stableDNSQueryID, transport: .tcp) == nil,
+          validateDNSResponse(Data([0x53, 0x50, 0x81, 0x80]), expectedID: stableDNSQueryID, transport: .tcp) == nil,
+          validateDNSResponse(makeDNSResponse(identifier: stableDNSQueryID ^ 1), expectedID: stableDNSQueryID, transport: .tcp) == nil else {
+        throw HelperError.transaction("DNS response parser self-test rejection fixture failed")
+    }
+    let truncated = makeDNSResponse(flags: 0x8380, answerCount: 0)
+    guard validateDNSResponse(truncated, expectedID: stableDNSQueryID, transport: .udp) == .truncated,
+          validateDNSResponse(truncated, expectedID: stableDNSQueryID, transport: .tcp) == nil else {
+        throw HelperError.transaction("DNS response parser self-test truncation fixture failed")
+    }
+    return status(healthy: true)
+}
+
 private func dnsQuery(_ target: Target, tcp: Bool) -> Bool {
     guard let port = NWEndpoint.Port(rawValue: UInt16(target.port)) else { return false }
     let connection = NWConnection(
@@ -501,9 +643,10 @@ private func dnsQuery(_ target: Target, tcp: Bool) -> Bool {
         port: port,
         using: tcp ? .tcp : .udp
     )
-    let query = Data([0x53, 0x50, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                      0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d,
-                      0x00, 0x00, 0x01, 0x00, 0x01])
+    var query = Data()
+    appendDNSUInt16(stableDNSQueryID, to: &query)
+    query.append(contentsOf: [0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+    query.append(stableDNSQuestion)
     let payload: Data
     if tcp {
         payload = Data([UInt8(query.count >> 8), UInt8(query.count & 0xff)]) + query
@@ -511,19 +654,20 @@ private func dnsQuery(_ target: Target, tcp: Bool) -> Bool {
         payload = query
     }
     let semaphore = DispatchSemaphore(value: 0)
+    let callbackQueue = DispatchQueue(label: "com.sparkle.dns-helper.dns-query")
+    let resultLock = NSLock()
     var result = false
     var finished = false
     let finish: (Bool) -> Void = { value in
-        guard !finished else { return }
+        resultLock.lock()
+        guard !finished else {
+            resultLock.unlock()
+            return
+        }
         finished = true
         result = value
+        resultLock.unlock()
         semaphore.signal()
-    }
-
-    func validate(_ data: Data?) -> Bool {
-        guard let data, data.count >= 4 else { return false }
-        return data[data.startIndex] == 0x53 && data[data.startIndex + 1] == 0x50 &&
-            data[data.startIndex + 2] & 0x80 != 0
     }
 
     connection.stateUpdateHandler = { state in
@@ -537,12 +681,18 @@ private func dnsQuery(_ target: Target, tcp: Bool) -> Bool {
                         let size = Int(length[0]) << 8 | Int(length[1])
                         guard size > 3, size <= 65535 else { finish(false); return }
                         connection.receive(minimumIncompleteLength: size, maximumLength: size) { data, _, _, error in
-                            finish(error == nil && validate(data))
+                            let validation = error == nil
+                                ? validateDNSResponse(data, expectedID: stableDNSQueryID, transport: .tcp)
+                                : nil
+                            finish(validation == .valid)
                         }
                     }
                 } else {
                     connection.receive(minimumIncompleteLength: 4, maximumLength: 4096) { data, _, _, error in
-                        finish(error == nil && validate(data))
+                        let validation = error == nil
+                            ? validateDNSResponse(data, expectedID: stableDNSQueryID, transport: .udp)
+                            : nil
+                        finish(validation == .valid || validation == .truncated)
                     }
                 }
             })
@@ -552,10 +702,17 @@ private func dnsQuery(_ target: Target, tcp: Bool) -> Bool {
             break
         }
     }
-    connection.start(queue: DispatchQueue.global(qos: .utility))
-    if semaphore.wait(timeout: .now() + 2.0) == .timedOut { connection.cancel(); return false }
+    connection.start(queue: callbackQueue)
+    if semaphore.wait(timeout: .now() + 2.0) == .timedOut {
+        finish(false)
+        connection.cancel()
+        return false
+    }
     connection.cancel()
-    return result
+    resultLock.lock()
+    let finalResult = result
+    resultLock.unlock()
+    return finalResult
 }
 
 private func healthy(_ target: Target) -> Bool {
@@ -1054,6 +1211,33 @@ private func writeLaunchDaemonPlist(uid: uid_t, buildID: String) throws {
     try syncDirectory(URL(fileURLWithPath: launchDaemonPath).deletingLastPathComponent().path)
 }
 
+private func recoverAfterInstallFailure() {
+    // installDaemon is called while withLeaseLock is held. If replacement
+    // stopped a healthy daemon before a later file/launchd step failed, first
+    // undo only Sparkle-owned DNS fields while that same lease lock remains
+    // held; a compare-and-swap conflict is deliberately left untouched.
+    do {
+        if let state = try readState() {
+            do {
+                try restoreState(state)
+            } catch {
+                let message = "Sparkle DNS helper install rollback skipped: \(error.localizedDescription)\n"
+                FileHandle.standardError.write(Data(message.utf8))
+            }
+        }
+    } catch {
+        let message = "Sparkle DNS helper install rollback could not read lease state: \(error.localizedDescription)\n"
+        FileHandle.standardError.write(Data(message.utf8))
+    }
+
+    // Only re-bootstrap artifacts that were completely written. Do not
+    // invent a new root operation after a source/plist validation failure.
+    guard FileManager.default.fileExists(atPath: installedHelperPath),
+          FileManager.default.fileExists(atPath: launchDaemonPath),
+          !daemonIsLoaded() else { return }
+    try? runLaunchctl(["bootstrap", "system", launchDaemonPath], allowFailure: true)
+}
+
 private func installDaemon(source: String?, authFile: String?, uidValue: String?, buildID: String?) throws -> Status {
     try requireRoot()
     let uid = try validateUID(uidValue)
@@ -1095,11 +1279,11 @@ private func installDaemon(source: String?, authFile: String?, uidValue: String?
         try runLaunchctl(["kickstart", "-k", "system/\(launchDaemonLabel)"], allowFailure: true)
         return status()
     } catch {
-        // Keep a persisted lease recoverable even if an installer/launchd
-        // operation fails midway.  The bootstrap is best-effort because the
-        // original error remains the actionable result for the app.
-        try? runLaunchctl(["bootstrap", "system", launchDaemonPath], allowFailure: true)
-        throw error
+        let originalError = error
+        recoverAfterInstallFailure()
+        // Keep the original install error as the actionable result. The
+        // recovery path never overwrites a conflict or external DNS change.
+        throw originalError
     }
 }
 
@@ -1302,6 +1486,8 @@ do {
         }
     case "uninstall":
         result = try withLeaseLock { try uninstallDaemon() }
+    case "self-test":
+        result = try runNativeSelfTest()
     case "daemon":
         try daemon(
             argument("--auth-file", in: arguments),
@@ -1309,7 +1495,7 @@ do {
             buildID: argument("--build-id", in: arguments)
         )
     default:
-        throw HelperError.invalid("仅支持 install、uninstall、daemon、acquire、release、status、reconcile")
+        throw HelperError.invalid("仅支持 install、uninstall、daemon、acquire、release、status、reconcile、self-test")
     }
     writeJSON(result)
 } catch let error as HelperError {

@@ -196,6 +196,13 @@ jobs:
           file extra/files/sparkle-dns-helper
           file extra/files/sparkle-dns-helper | grep -q "Mach-O 64-bit executable ${EXPECTED_ARCH}"
 
+      - name: Test macOS DNS helper
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          pnpm test:dns-helper
+          extra/files/sparkle-dns-helper self-test --json
+
       - name: Build
         env:
           npm_config_arch: ${{ matrix.arch }}

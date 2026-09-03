@@ -29,6 +29,7 @@ fs.mkdirSync(path.dirname(output), { recursive: true })
 const args = [
   '-O',
   '-whole-module-optimization',
+  '-warnings-as-errors',
   '-target',
   // Sparkle ships a Catalina-compatible x64 package as well as the current
   // arm64 package; the helper uses APIs available on macOS 10.15.

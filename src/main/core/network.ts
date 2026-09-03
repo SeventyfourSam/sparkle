@@ -237,13 +237,6 @@ export async function reconcileMihomoSystemDNSLease(): Promise<void> {
           : 'macOS DNS helper 检测到外部 DNS 冲突')
     )
   }
-
-  // Disabled mode still cleans up a lease that the daemon owns. This branch
-  // is socket-only and therefore never prompts for administrator access.
-  const released = await releaseMihomoDnsLease()
-  if (!released.supported || released.active || released.conflict || released.error) {
-    throw new Error(released.error || 'macOS DNS helper stale lease 无法安全释放')
-  }
 }
 
 export async function setPublicDNS(): Promise<void> {

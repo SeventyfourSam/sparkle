@@ -47,6 +47,11 @@ status/release cleanup and never migrates or acquires a lease. Target-change
 requests allow up to 20 seconds for the pre-probe, locked restore/apply
 transaction, and post-probe.
 
+The packaged helper also supports `self-test --json`. This is a non-mutating
+native parser test for successful, truncated, malformed, wrong-ID, and DNS
+error responses; it opens no sockets and does not access SystemConfiguration.
+CI runs it alongside the TypeScript helper tests on both macOS architectures.
+
 `pnpm build:dns-helper -- --arch=arm64` and `--arch=x64` compile the Swift
 source with SystemConfiguration/CoreFoundation against macOS 10.15. The
 prepare step runs this only for Darwin targets; `extraResources` packages the
