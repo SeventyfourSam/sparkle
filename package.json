@@ -15,6 +15,8 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "pnpm run typecheck:node && pnpm run typecheck:web",
     "prepare": "node scripts/prepare.ts",
+    "build:dns-helper": "node scripts/build-dns-helper.ts",
+    "test:dns-helper": "tsx --test src/main/sys/dns-helper.test.ts",
     "updater": "node scripts/updater.ts",
     "checksum": "node scripts/checksum.ts",
     "telegram": "node scripts/telegram.ts",

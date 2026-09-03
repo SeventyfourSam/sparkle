@@ -53,28 +53,71 @@ export const isValidPort = (s: string): ValidationResult => {
   return p >= 1 && p <= 65535 ? { ok: true } : { ok: false, error: '端口应在 1 到 65535 之间' }
 }
 
+export interface ListenAddressParts {
+  host: string
+  port: number
+  wildcard: boolean
+}
+
+/** Parse a Mihomo host:port listen value without accepting ambiguous IPv6. */
+export const parseListenAddress = (
+  s: string | undefined
+): { ok: true; value: ListenAddressParts } | { ok: false; error: string } => {
+  if (!s || s.trim() === '') return { ok: false, error: '监听地址不能为空' }
+  const v = s.trim()
+  if (v !== s && s.length > 0) return { ok: false, error: '地址首尾不能包含空格' }
+
+  let host = ''
+  let portText: string
+  if (v.startsWith(':')) {
+    portText = v.slice(1)
+  } else if (v.startsWith('[')) {
+    const close = v.indexOf(']')
+    if (close < 0 || v.slice(close + 1, close + 2) !== ':') {
+      return { ok: false, error: 'IPv6 地址必须使用 [地址]:端口 格式' }
+    }
+    host = v.slice(1, close)
+    portText = v.slice(close + 2)
+    const result = isIPv6(host)
+    if (!result.ok) return { ok: false, error: result.error ?? '无效的 IPv6 地址' }
+  } else {
+    const idx = v.lastIndexOf(':')
+    if (idx < 0) return { ok: false, error: '应包含端口号' }
+    host = v.slice(0, idx)
+    portText = v.slice(idx + 1)
+    if (host.includes(':')) {
+      return { ok: false, error: 'IPv6 地址必须使用 [地址]:端口 格式' }
+    }
+  }
+
+  const portResult = isValidPort(portText)
+  if (!portResult.ok) return { ok: false, error: portResult.error ?? '端口号不合法' }
+
+  const wildcard = host === '' || host === '*' || host === '0.0.0.0' || host === '::'
+  if (!wildcard) {
+    if (/^[0-9.]+$/.test(host)) {
+      const result = isIPv4(host)
+      if (!result.ok) return { ok: false, error: result.error ?? '无效的 IPv4 地址' }
+    } else if (host.includes(':')) {
+      // The bracketed branch above already validates IPv6.
+      return { ok: false, error: 'IPv6 地址必须使用 [地址]:端口 格式' }
+    } else if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(host)) {
+      return { ok: false, error: '主机名包含非法字符' }
+    }
+  }
+
+  return { ok: true, value: { host, port: Number(portText), wildcard } }
+}
+
+export const isWildcardListenAddress = (s: string | undefined): boolean => {
+  const result = parseListenAddress(s)
+  return result.ok && result.value.wildcard
+}
+
 export const isValidListenAddress = (s: string | undefined): ValidationResult => {
   if (!s || s.trim() === '') return { ok: true }
-  const v = s.trim()
-  if (v.startsWith(':')) {
-    return isValidPort(v.slice(1))
-  }
-  const idx = v.lastIndexOf(':')
-  if (idx === -1) return { ok: false, error: '应包含端口号' }
-  const host = v.slice(0, idx)
-  const port = v.slice(idx + 1)
-  if (!isValidPort(port)) return { ok: false, error: '端口号不合法' }
-  if (host.startsWith('[') && host.endsWith(']')) {
-    const inner = host.slice(1, -1)
-    return isIPv6(inner)
-  }
-  if (/^[0-9a-zA-Z-.]+$/.test(host)) {
-    if (/^[0-9.]+$/.test(host)) {
-      return isIPv4(host)
-    }
-    return /^[a-zA-Z0-9-.]+$/.test(host) ? { ok: true } : { ok: false, error: '主机名包含非法字符' }
-  }
-  return { ok: false, error: '主机名包含非法字符' }
+  const result = parseListenAddress(s)
+  return result.ok ? { ok: true } : { ok: false, error: result.error }
 }
 
 export const isValidDomainWildcard = (s: string | undefined): ValidationResult => {

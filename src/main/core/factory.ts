@@ -257,6 +257,10 @@ function cleanDnsConfig(profile: MihomoConfig, controlDns: boolean): void {
     delete dnsConfig['proxy-server-nameserver-policy']
   }
 
+  // An empty controlled value is an explicit tombstone.  It must win over a
+  // subscription value while the final Mihomo config omits the empty field.
+  if (dnsConfig.listen === '') delete dnsConfig.listen
+
   delete dnsConfig.fallback
   delete dnsConfig['fallback-filter']
 }

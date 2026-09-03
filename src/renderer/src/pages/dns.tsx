@@ -13,7 +13,9 @@ import {
   isValidIPv4Cidr,
   isValidIPv6Cidr,
   isValidDomainWildcard,
-  isValidDnsServer
+  isValidDnsServer,
+  isValidListenAddress,
+  isWildcardListenAddress
 } from '@renderer/utils/validate'
 
 const DNS: React.FC = () => {
@@ -42,7 +44,8 @@ const DNS: React.FC = () => {
     'proxy-server-nameserver': proxyServerNameserver = [],
     'direct-nameserver': directNameserver = [],
     'nameserver-policy': nameserverPolicy = {},
-    'proxy-server-nameserver-policy': proxyServerNameserverPolicy = {}
+    'proxy-server-nameserver-policy': proxyServerNameserverPolicy = {},
+    listen = ''
   } = dns || {}
   const [changed, setChanged] = useState(false)
   const [values, originSetValues] = useState({
@@ -60,6 +63,7 @@ const DNS: React.FC = () => {
     directNameserver,
     nameserverPolicy,
     proxyServerNameserverPolicy,
+    listen,
     hosts: useHosts ? hosts : undefined
   })
   const [fakeIPRangeError, setFakeIPRangeError] = useState<string | null>(() => {
@@ -86,7 +90,13 @@ const DNS: React.FC = () => {
     return firstInvalid ? (isValidDnsServer(firstInvalid).error ?? '格式错误') : null
   })
   const [advancedDnsError, setAdvancedDnsError] = useState(false)
-  const hasDnsErrors = Boolean(defaultNameserverError || nameserverError || advancedDnsError)
+  const [listenError, setListenError] = useState<string | null>(() => {
+    const result = isValidListenAddress(listen)
+    return result.ok ? null : (result.error ?? '格式错误')
+  })
+  const hasDnsErrors = Boolean(
+    defaultNameserverError || nameserverError || advancedDnsError || listenError
+  )
 
   const setValues = (v: typeof values): void => {
     originSetValues(v)
@@ -143,7 +153,10 @@ const DNS: React.FC = () => {
                 'proxy-server-nameserver': values.proxyServerNameserver,
                 'direct-nameserver': values.directNameserver,
                 'nameserver-policy': values.nameserverPolicy,
-                'proxy-server-nameserver-policy': values.proxyServerNameserverPolicy
+                'proxy-server-nameserver-policy': values.proxyServerNameserverPolicy,
+                // Persist an explicit empty sentinel so a subscription-provided
+                // dns.listen is cleared by the controlled configuration layer.
+                listen: values.listen.trim()
               }
               onSave({
                 dns: dnsConfig,
@@ -165,6 +178,30 @@ const DNS: React.FC = () => {
               setValues({ ...values, ipv6: v })
             }}
           />
+        </SettingItem>
+        <SettingItem compatKey="legacy" title="DNS 监听地址" divider>
+          <Tooltip
+            content={listenError || '通配地址会向局域网暴露 DNS 监听器，请确认这是有意配置'}
+            placement="right"
+            isOpen={Boolean(listenError || isWildcardListenAddress(values.listen))}
+            showArrow={true}
+            color={listenError ? 'danger' : 'warning'}
+            offset={15}
+          >
+            <Input
+              size="sm"
+              className={
+                `w-[40%] ` + (listenError ? 'border-red-500 ring-1 ring-red-500 rounded-lg' : '')
+              }
+              placeholder="例：127.0.0.1:1053（留空禁用）"
+              value={values.listen}
+              onValueChange={(v) => {
+                setValues({ ...values, listen: v })
+                const result = isValidListenAddress(v)
+                setListenError(result.ok ? null : (result.error ?? '格式错误'))
+              }}
+            />
+          </Tooltip>
         </SettingItem>
         <SettingItem compatKey="legacy" title="域名映射模式" divider>
           <Tabs

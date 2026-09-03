@@ -187,6 +187,15 @@ jobs:
             || (echo "Missing $SPARKLE_NATIVE_PACKAGE. pnpm must install cross-platform optional native dependencies." && exit 1)
           pnpm prepare --${{ matrix.arch }}
 
+      - name: Verify macOS DNS helper architecture
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          EXPECTED_ARCH="x86_64"
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then EXPECTED_ARCH="arm64"; fi
+          file extra/files/sparkle-dns-helper
+          file extra/files/sparkle-dns-helper | grep -q "Mach-O 64-bit executable ${EXPECTED_ARCH}"
+
       - name: Build
         env:
           npm_config_arch: ${{ matrix.arch }}

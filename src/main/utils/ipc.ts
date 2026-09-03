@@ -62,7 +62,11 @@ import {
   subStorePort
 } from '../resolve/server'
 import { quitWithoutCore, restartCore, startNetworkDetection, stopCore } from '../core/manager'
-import { stopNetworkDetection } from '../core/network'
+import {
+  releaseMihomoSystemDNSLease,
+  stopNetworkDetection,
+  validateMihomoSystemDnsMode
+} from '../core/network'
 import {
   checkCorePermission,
   manualGrantCorePermition,
@@ -95,6 +99,7 @@ import {
 import { patchCoreProfile } from '../service/api'
 import { coreLogPath, findSystemMihomo, logDir } from './dirs'
 import {
+  generateProfile,
   getRuntimeConfig,
   getRuntimeConfigStr,
   getRawProfileStr,
@@ -138,6 +143,11 @@ import { showNotification } from './notification'
 import { getUserAgent } from './userAgent'
 import { appendAppLog, clearCachedMihomoLogs, getCachedMihomoLogs } from './log'
 import { ageIdentityToRecipient, generateAgeKeyPair } from './age'
+import {
+  ensureMihomoDnsHelperDaemon,
+  getMihomoDnsLeaseStatus,
+  isMihomoDnsHelperAvailable
+} from '../sys/dns-helper'
 
 function ipcErrorWrapper<T>( // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fn: (...args: any[]) => T | Promise<T> // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -163,6 +173,46 @@ function ipcErrorWrapper<T>( // eslint-disable-next-line @typescript-eslint/no-e
 }
 
 async function patchAppConfigWithServiceSync(patch: Partial<AppConfig>): Promise<AppConfig> {
+  const currentConfig = await getAppConfig()
+  if (
+    (patch.macosSystemDnsMode === 'none' || patch.controlDns === false) &&
+    currentConfig.macosSystemDnsMode === 'mihomo-listener'
+  ) {
+    // Changing the mode is itself a lifecycle operation.  Release first so a
+    // failed restore leaves the old mode and a running core in place.
+    await releaseMihomoSystemDNSLease()
+    if (patch.controlDns === false && patch.macosSystemDnsMode === undefined) {
+      patch = { ...patch, macosSystemDnsMode: 'none' }
+    }
+  }
+
+  if (
+    process.platform === 'darwin' &&
+    patch.macosSystemDnsMode === 'mihomo-listener' &&
+    currentConfig.macosSystemDnsMode !== 'mihomo-listener'
+  ) {
+    let runtimeConfig = await getRuntimeConfig()
+    if (!runtimeConfig) {
+      // The mode can be enabled before the first core start. Build the same
+      // final profile that the core will consume so subscription DNS values
+      // (including system upstreams) are validated too.
+      await generateProfile()
+      runtimeConfig = await getRuntimeConfig()
+    }
+    const validation = validateMihomoSystemDnsMode(
+      { ...currentConfig, macosSystemDnsMode: 'mihomo-listener' },
+      await getControledMihomoConfig(),
+      runtimeConfig
+    )
+    if (!validation.ok) {
+      throw new Error(validation.error || 'macOS Mihomo system DNS prerequisites are not met')
+    }
+    // Install the fixed, root-owned LaunchDaemon before persisting the mode;
+    // a failed authorization or installation must not leave an active setting
+    // whose lifecycle cannot be safely released.
+    await ensureMihomoDnsHelperDaemon()
+  }
+
   const nextConfig = await patchAppConfig(await normalizeServiceModePatch(patch))
 
   if (!('saveLogs' in patch || 'maxLogFileSizeMB' in patch)) {
@@ -187,6 +237,17 @@ async function patchAppConfigWithServiceSync(patch: Partial<AppConfig>): Promise
   })
 
   return nextConfig
+}
+
+async function patchControlledConfigSafely(patch: Partial<MihomoConfig>): Promise<void> {
+  const currentConfig = await getAppConfig()
+  const disablesMihomoListener =
+    patch.tun?.enable === false || patch.dns?.enable === false || patch.dns?.listen === ''
+  if (disablesMihomoListener && currentConfig.macosSystemDnsMode === 'mihomo-listener') {
+    await releaseMihomoSystemDNSLease()
+    await patchAppConfig({ macosSystemDnsMode: 'none' })
+  }
+  await patchControledMihomoConfig(patch)
 }
 
 async function normalizeServiceModePatch(patch: Partial<AppConfig>): Promise<Partial<AppConfig>> {
@@ -258,7 +319,7 @@ export function registerIpcMainHandlers(): void {
     ipcErrorWrapper(getControledMihomoConfig)(force)
   )
   ipcMain.handle('patchControledMihomoConfig', (_e, config) =>
-    ipcErrorWrapper(patchControledMihomoConfig)(config)
+    ipcErrorWrapper(patchControlledConfigSafely)(config)
   )
   ipcMain.handle('getProfileConfig', (_e, force) => ipcErrorWrapper(getProfileConfig)(force))
   ipcMain.handle('setProfileConfig', (_e, config) => ipcErrorWrapper(setProfileConfig)(config))
@@ -305,6 +366,8 @@ export function registerIpcMainHandlers(): void {
   ipcMain.handle('checkElevateTask', () => ipcErrorWrapper(checkElevateTask)())
   ipcMain.handle('deleteElevateTask', () => ipcErrorWrapper(deleteElevateTask)())
   ipcMain.handle('serviceStatus', () => ipcErrorWrapper(serviceStatus)())
+  ipcMain.handle('mihomoDnsHelperAvailable', () => isMihomoDnsHelperAvailable())
+  ipcMain.handle('mihomoDnsHelperStatus', () => ipcErrorWrapper(getMihomoDnsLeaseStatus)())
   ipcMain.handle('testServiceConnection', () => ipcErrorWrapper(testServiceConnection)())
   ipcMain.handle('initService', () => ipcErrorWrapper(initService)())
   ipcMain.handle('installService', () => ipcErrorWrapper(installService)())

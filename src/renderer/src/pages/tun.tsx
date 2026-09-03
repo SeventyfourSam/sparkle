@@ -4,17 +4,46 @@ import SettingCard from '@renderer/components/base/base-setting-card'
 import SettingItem from '@renderer/components/base/base-setting-item'
 import EditableList from '@renderer/components/base/base-list-editor'
 import { useControledMihomoConfig } from '@renderer/hooks/use-controled-mihomo-config'
-import { restartCore, setupFirewall } from '@renderer/utils/ipc'
+import { mihomoDnsHelperAvailable, restartCore, setupFirewall } from '@renderer/utils/ipc'
 import { platform } from '@renderer/utils/init'
 import React, { Key, useState } from 'react'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
 import { notify } from '@renderer/utils/notification'
+import { isWildcardListenAddress, parseListenAddress } from '@renderer/utils/validate'
 
 const Tun: React.FC = () => {
   const { controledMihomoConfig, patchControledMihomoConfig } = useControledMihomoConfig()
   const { appConfig, patchAppConfig } = useAppConfig()
-  const { autoSetDNSMode = 'none' } = appConfig || {}
-  const { tun } = controledMihomoConfig || {}
+  const {
+    autoSetDNSMode = 'none',
+    macosSystemDnsMode = 'none',
+    controlDns = true
+  } = appConfig || {}
+  const { tun, dns } = controledMihomoConfig || {}
+  const listenResult = parseListenAddress(dns?.listen)
+  const dnsValues = [
+    ...(dns?.['default-nameserver'] || []),
+    ...(dns?.nameserver || []),
+    ...(dns?.fallback || []),
+    ...(dns?.['proxy-server-nameserver'] || []),
+    ...(dns?.['direct-nameserver'] || []),
+    ...Object.values(dns?.['nameserver-policy'] || {}).flat(),
+    ...Object.values(dns?.['proxy-server-nameserver-policy'] || {}).flat()
+  ]
+  const usesSystemDns = dnsValues.some(
+    (value) =>
+      typeof value === 'string' && /^(?:system|system:\/\/|dhcp:\/\/system)(?:#|$)/i.test(value)
+  )
+  const canUseMihomoSystemDns = Boolean(
+    controlDns &&
+    dns?.enable === true &&
+    tun?.enable === true &&
+    listenResult.ok &&
+    !listenResult.value.wildcard &&
+    (listenResult.value.host === '127.0.0.1' || listenResult.value.host === '::1') &&
+    listenResult.value.port !== 53 &&
+    !usesSystemDns
+  )
   const [loading, setLoading] = useState(false)
   const {
     device = platform === 'darwin' ? undefined : 'mihomo',
@@ -110,20 +139,68 @@ const Tun: React.FC = () => {
             </SettingItem>
           )}
           {platform === 'darwin' && (
-            <SettingItem compatKey="legacy" title="自动设置系统 DNS" divider>
-              <Tabs
-                size="sm"
-                color="primary"
-                selectedKey={autoSetDNSMode}
-                onSelectionChange={async (key: Key) => {
-                  await patchAppConfig({ autoSetDNSMode: key as 'none' | 'exec' | 'service' })
-                }}
-              >
-                <Tab key="none" title="不自动设置" />
-                <Tab key="exec" title="执行命令" />
-                <Tab key="service" title="服务模式" />
-              </Tabs>
-            </SettingItem>
+            <>
+              <SettingItem compatKey="legacy" title="自动设置公共 DNS（兼容模式）" divider>
+                <Tabs
+                  size="sm"
+                  color="primary"
+                  selectedKey={autoSetDNSMode}
+                  onSelectionChange={async (key: Key) => {
+                    await patchAppConfig({ autoSetDNSMode: key as 'none' | 'exec' | 'service' })
+                  }}
+                >
+                  <Tab key="none" title="不自动设置" />
+                  <Tab key="exec" title="执行命令" />
+                  <Tab key="service" title="服务模式" />
+                </Tabs>
+              </SettingItem>
+              <SettingItem compatKey="legacy" title="macOS 默认 DNS 指向 Mihomo" divider>
+                <Tabs
+                  size="sm"
+                  color="primary"
+                  selectedKey={macosSystemDnsMode}
+                  onSelectionChange={async (key: Key) => {
+                    const nextMode = key as 'none' | 'mihomo-listener'
+                    if (nextMode === 'mihomo-listener') {
+                      if (!canUseMihomoSystemDns) {
+                        notify(
+                          '需要启用受控 DNS 和 Tun，并将 dns.listen 配置为 127.0.0.1:非 53 端口；上游不能使用 system',
+                          { variant: 'warning' }
+                        )
+                        return
+                      }
+                      if (!(await mihomoDnsHelperAvailable())) {
+                        notify('Sparkle macOS DNS helper 未安装；不会回退到 networksetup', {
+                          variant: 'danger'
+                        })
+                        return
+                      }
+                    }
+                    try {
+                      await patchAppConfig({ macosSystemDnsMode: nextMode })
+                      await restartCore()
+                    } catch (error) {
+                      notify(error, { variant: 'danger' })
+                    }
+                  }}
+                >
+                  <Tab key="none" title="不自动设置" />
+                  <Tab
+                    key="mihomo-listener"
+                    title="使用 Mihomo 监听器"
+                    isDisabled={!canUseMihomoSystemDns && macosSystemDnsMode !== 'mihomo-listener'}
+                  />
+                </Tabs>
+                {!canUseMihomoSystemDns && macosSystemDnsMode !== 'mihomo-listener' && (
+                  <span className="text-warning text-xs ml-2">
+                    需要 Tun、受控 DNS 和回环非 53 监听器
+                  </span>
+                )}
+                {isWildcardListenAddress(dns?.listen) && (
+                  <span className="text-warning text-xs ml-2">通配监听器不能用于系统 DNS</span>
+                )}
+              </SettingItem>
+            </>
           )}
           <SettingItem compatKey="legacy" title="Tun 模式堆栈" divider>
             <Tabs

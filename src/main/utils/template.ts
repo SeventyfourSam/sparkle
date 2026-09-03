@@ -63,6 +63,7 @@ export const defaultConfig: AppConfig = {
   autoLightweightMode: 'core',
   coreStartupMode: 'post-up',
   serviceRunMode: 'auto',
+  macosSystemDnsMode: 'none',
   delayTestConcurrency: 50,
   delayTestUseGroupApi: false,
   delayTestUrlScope: 'group',
@@ -112,6 +113,7 @@ export const defaultControledMihomoConfig: Partial<MihomoConfig> = {
   },
   dns: {
     enable: true,
+    listen: '',
     ipv6: true,
     'respect-rules': false,
     'enhanced-mode': 'fake-ip',

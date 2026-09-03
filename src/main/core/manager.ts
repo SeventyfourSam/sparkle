@@ -44,7 +44,14 @@ import {
 } from '../utils/notification'
 import { createCoreHookWaiter, createCoreStartupHook } from './startupHook'
 import { stopChildProcess } from './process-control'
-import { recoverDNS, setPublicDNS, startNetworkDetectionController } from './network'
+import {
+  acquireMihomoSystemDNSLease,
+  recoverDNS,
+  reconcileMihomoSystemDNSLease,
+  releaseMihomoSystemDNSLease,
+  setPublicDNS,
+  startNetworkDetectionController
+} from './network'
 import { checkProfile } from './profile-check'
 import {
   createCoreEnvironment,
@@ -235,6 +242,10 @@ async function completeCoreInitialization(logLevel?: LogLevel): Promise<void> {
     tasks.push(delay(100).then(() => patchMihomoConfig({ 'log-level': logLevel })))
   }
 
+  // The core is fully ready at this point. The local macOS helper performs
+  // bounded UDP/TCP DNS exchanges before mutating SystemConfiguration.
+  tasks.push(acquireMihomoSystemDNSLease())
+
   await Promise.all(tasks)
   setMihomoLogSource('ws')
 }
@@ -345,6 +356,13 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
   const { current } = profileConfig
   const useServiceCore = corePermissionMode === 'service' && !detached
 
+  // Reconcile any helper transaction left by a crash before touching the
+  // Mihomo process. Installation is socket-idempotent and only prompts when
+  // launchd genuinely needs to be installed or repaired.
+  if (process.platform === 'darwin') {
+    await reconcileMihomoSystemDNSLease()
+  }
+
   let corePath: string
   try {
     corePath = mihomoCorePath(core)
@@ -377,7 +395,11 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     await stopCore()
   }
   setMihomoLogSource('out')
-  if (tun?.enable && autoSetDNSMode !== 'none') {
+  if (
+    tun?.enable &&
+    autoSetDNSMode !== 'none' &&
+    appConfig.macosSystemDnsMode !== 'mihomo-listener'
+  ) {
     try {
       await setPublicDNS()
     } catch (error) {
@@ -597,11 +619,32 @@ export async function stopCore(force = false): Promise<void> {
   serviceCoreRuntime.pauseAutoResume()
 
   try {
+    // Reconcile pending/active helper state before any stop path can tear
+    // down the listener that the system resolver may still be using.
+    await reconcileMihomoSystemDNSLease()
+    await releaseMihomoSystemDNSLease()
+  } catch (error) {
+    await appendAppLog(`[Manager]: restore macOS system DNS failed, ${error}\n`)
+    void showNotification({
+      title: '系统 DNS 恢复失败，内核保持运行',
+      body: `${error}`,
+      variant: 'danger'
+    })
+    throw error
+  }
+
+  try {
     if (!force) {
       await recoverDNS()
     }
   } catch (error) {
     await appendAppLog(`[Manager]: recover dns failed, ${error}\n`)
+    void showNotification({
+      title: 'DNS 恢复失败，内核保持运行',
+      body: `${error}`,
+      variant: 'danger'
+    })
+    throw error
   }
 
   serviceCoreRuntime.clearStreams()
@@ -734,8 +777,23 @@ export async function restartCore(): Promise<void> {
 
 export async function keepCoreAlive(): Promise<void> {
   try {
-    const { corePermissionMode = 'elevated' } = await getAppConfig()
+    const { corePermissionMode = 'elevated', macosSystemDnsMode = 'none' } = await getAppConfig()
     if (corePermissionMode === 'service') {
+      return
+    }
+
+    // The running core already owns the healthy listener in this mode.  Keep
+    // it (and its resolver lease) alive when the UI enters lightweight mode;
+    // restarting a detached core here would otherwise release the lease before
+    // the detached startup path can validate and reacquire it.
+    if (
+      process.platform === 'darwin' &&
+      macosSystemDnsMode === 'mihomo-listener' &&
+      directCoreState.child
+    ) {
+      if (directCoreState.child.pid) {
+        await writeFile(path.join(dataDir(), 'core.pid'), directCoreState.child.pid.toString())
+      }
       return
     }
 

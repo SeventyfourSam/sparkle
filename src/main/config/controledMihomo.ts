@@ -23,6 +23,13 @@ export async function getControledMihomoConfig(force = false): Promise<Partial<M
   }
   if (typeof controledMihomoConfig !== 'object')
     controledMihomoConfig = defaultControledMihomoConfig
+
+  // Keep an explicit empty listener tombstone in older controlled configs so
+  // a subscription cannot silently reintroduce dns.listen after migration.
+  if (controledMihomoConfig.dns && controledMihomoConfig.dns.listen === undefined) {
+    controledMihomoConfig.dns = { ...controledMihomoConfig.dns, listen: '' }
+    await writeFile(controledMihomoConfigPath(), stringifyYaml(controledMihomoConfig), 'utf-8')
+  }
   return controledMihomoConfig
 }
 

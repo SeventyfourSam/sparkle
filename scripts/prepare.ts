@@ -427,9 +427,24 @@ type Task = {
   winOnly?: boolean
   linuxOnly?: boolean
   unixOnly?: boolean
+  darwinOnly?: boolean
 }
 
 const tasks: Task[] = [
+  {
+    name: 'dns-helper',
+    func: () =>
+      new Promise<void>((resolve, reject) => {
+        try {
+          execSync(`node scripts/build-dns-helper.ts --arch=${arch}`, { stdio: 'inherit' })
+          resolve()
+        } catch (error) {
+          reject(error)
+        }
+      }),
+    retry: 1,
+    darwinOnly: true
+  },
   {
     name: 'mihomo-alpha',
     func: () => getLatestAlphaVersion().then(() => resolveSidecar(MihomoAlpha())),
@@ -498,6 +513,7 @@ async function runTask() {
   if (task.winOnly && platform !== 'win32') return runTask()
   if (task.linuxOnly && platform !== 'linux') return runTask()
   if (task.unixOnly && platform === 'win32') return runTask()
+  if (task.darwinOnly && platform !== 'darwin') return runTask()
 
   for (let i = 0; i < task.retry; i++) {
     try {
