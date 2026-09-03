@@ -566,7 +566,7 @@ private func validateDNSResponse(
     guard identifier == expectedID,
           flags & 0x8000 != 0,
           flags & 0x7800 == 0,
-          flags & 0x0070 == 0,
+          flags & 0x0040 == 0,
           flags & 0x000f == 0,
           questionCount == 1,
           let questionEnd = skipDNSName(data, from: 12),
@@ -612,7 +612,9 @@ private func makeDNSResponse(
 
 private func runNativeSelfTest() throws -> Status {
     guard validateDNSResponse(makeDNSResponse(), expectedID: stableDNSQueryID, transport: .udp) == .valid,
-          validateDNSResponse(makeDNSResponse(), expectedID: stableDNSQueryID, transport: .tcp) == .valid else {
+          validateDNSResponse(makeDNSResponse(), expectedID: stableDNSQueryID, transport: .tcp) == .valid,
+          validateDNSResponse(makeDNSResponse(flags: 0x81a0), expectedID: stableDNSQueryID, transport: .tcp) == .valid,
+          validateDNSResponse(makeDNSResponse(flags: 0x8190), expectedID: stableDNSQueryID, transport: .tcp) == .valid else {
         throw HelperError.transaction("DNS response parser self-test success fixture failed")
     }
     for flags in [UInt16(0x8182), UInt16(0x8185), UInt16(0x8183)] {
@@ -625,6 +627,7 @@ private func runNativeSelfTest() throws -> Status {
     guard validateDNSResponse(makeDNSResponse(answerCount: 0), expectedID: stableDNSQueryID, transport: .tcp) == nil,
           validateDNSResponse(malformedAnswer, expectedID: stableDNSQueryID, transport: .tcp) == nil,
           validateDNSResponse(Data([0x53, 0x50, 0x81, 0x80]), expectedID: stableDNSQueryID, transport: .tcp) == nil,
+          validateDNSResponse(makeDNSResponse(flags: 0x81c0), expectedID: stableDNSQueryID, transport: .tcp) == nil,
           validateDNSResponse(makeDNSResponse(identifier: stableDNSQueryID ^ 1), expectedID: stableDNSQueryID, transport: .tcp) == nil else {
         throw HelperError.transaction("DNS response parser self-test rejection fixture failed")
     }
