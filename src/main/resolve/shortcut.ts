@@ -9,6 +9,7 @@ import {
 import { triggerSysProxy } from '../sys/sysproxy'
 import { patchMihomoConfig } from '../core/mihomoApi'
 import { quitWithoutCore, restartCore } from '../core/manager'
+import { patchControlledConfigSafely } from '../core/network'
 import { floatingWindow, triggerFloatingWindow } from './floatingWindow'
 import { showNotification } from '../utils/notification'
 
@@ -61,9 +62,9 @@ export async function registerShortcut(
         const enable = tun?.enable ?? false
         try {
           if (!enable) {
-            await patchControledMihomoConfig({ tun: { enable: !enable }, dns: { enable: true } })
+            await patchControlledConfigSafely({ tun: { enable: !enable }, dns: { enable: true } })
           } else {
-            await patchControledMihomoConfig({ tun: { enable: !enable } })
+            await patchControlledConfigSafely({ tun: { enable: !enable } })
           }
           await restartCore()
           void showNotification({

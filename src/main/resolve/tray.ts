@@ -31,6 +31,7 @@ import {
 import { dataDir, logDir, mihomoCoreDir, mihomoWorkDir } from '../utils/dirs'
 import { triggerSysProxy } from '../sys/sysproxy'
 import { quitWithoutCore, restartCore } from '../core/manager'
+import { patchControlledConfigSafely } from '../core/network'
 import { floatingWindow, triggerFloatingWindow } from './floatingWindow'
 import { is } from '@electron-toolkit/utils'
 import { extname, join } from 'path'
@@ -346,9 +347,9 @@ export const buildContextMenu = async (): Promise<Menu> => {
         const enable = item.checked
         try {
           if (enable) {
-            await patchControledMihomoConfig({ tun: { enable }, dns: { enable: true } })
+            await patchControlledConfigSafely({ tun: { enable }, dns: { enable: true } })
           } else {
-            await patchControledMihomoConfig({ tun: { enable } })
+            await patchControlledConfigSafely({ tun: { enable } })
           }
           mainWindow?.webContents.send('controledMihomoConfigUpdated')
           floatingWindow?.webContents.send('controledMihomoConfigUpdated')

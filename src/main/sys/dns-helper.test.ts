@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  buildDnsHelperInstallArgs,
+  decideDnsLeaseReconcile,
+  dnsHelperProtocolVersion,
   isOwnedDnsTarget,
+  needsDnsHelperInstall,
   nextAcquireAction,
   parseDnsLeaseTarget,
   restoreOwnedDnsFields,
@@ -73,4 +77,92 @@ test('restore merges only Sparkle-owned fields', () => {
     SearchDomains: ['corp.example'],
     SupplementalMatchDomains: ['corp.example']
   })
+})
+
+test('installer receives the auth file path, never the token value', () => {
+  const authPath = '/Users/test/Library/Application Support/Sparkle/dns-helper-auth'
+  const token = 'a'.repeat(64)
+  const args = buildDnsHelperInstallArgs(
+    '/Applications/Sparkle.app/Contents/Resources/files/sparkle-dns-helper',
+    authPath,
+    501,
+    token
+  )
+  const authIndex = args.indexOf('--auth-file')
+  assert.equal(args[authIndex + 1], authPath)
+  assert.notEqual(args[authIndex + 1], token)
+  assert.throws(
+    () =>
+      buildDnsHelperInstallArgs(
+        '/Applications/Sparkle.app/Contents/Resources/files/sparkle-dns-helper',
+        token,
+        501,
+        token
+      ),
+    /absolute auth file path/
+  )
+})
+
+test('helper update decision separates wire compatibility from build identity', () => {
+  const buildId = 'b'.repeat(64)
+  assert.equal(needsDnsHelperInstall(undefined, buildId), 'install')
+  assert.equal(
+    needsDnsHelperInstall(
+      { supported: true, version: dnsHelperProtocolVersion, build_id: buildId },
+      buildId
+    ),
+    'ready'
+  )
+  assert.equal(
+    needsDnsHelperInstall(
+      { supported: true, version: dnsHelperProtocolVersion + 1, build_id: buildId },
+      buildId
+    ),
+    'install'
+  )
+  assert.equal(
+    needsDnsHelperInstall(
+      { supported: true, version: dnsHelperProtocolVersion, build_id: 'c'.repeat(64) },
+      buildId
+    ),
+    'install'
+  )
+})
+
+test('disabled reconcile is a no-op without a daemon and releases a stale lease', () => {
+  assert.equal(
+    decideDnsLeaseReconcile('none', {
+      supported: false,
+      active: false,
+      conflict: false,
+      error: 'socket missing'
+    }),
+    'noop'
+  )
+  assert.equal(
+    decideDnsLeaseReconcile('none', {
+      supported: true,
+      active: true,
+      conflict: false,
+      error: undefined
+    }),
+    'release'
+  )
+  assert.equal(
+    decideDnsLeaseReconcile('mihomo-listener', {
+      supported: false,
+      active: false,
+      conflict: false,
+      error: 'daemon missing'
+    }),
+    'error'
+  )
+})
+
+test('controlled config disabling patches are lifecycle-routed', async () => {
+  const { isDisablingMihomoListenerPatch } = await import('./dns-helper-protocol')
+  assert.equal(isDisablingMihomoListenerPatch({ tun: { enable: false } }), true)
+  assert.equal(isDisablingMihomoListenerPatch({ dns: { enable: false } }), true)
+  assert.equal(isDisablingMihomoListenerPatch({ dns: { listen: '' } }), true)
+  assert.equal(isDisablingMihomoListenerPatch({ tun: { enable: true } }), false)
 })

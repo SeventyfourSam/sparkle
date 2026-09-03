@@ -28,7 +28,6 @@ import {
   getAppConfig,
   patchAppConfig,
   getControledMihomoConfig,
-  patchControledMihomoConfig,
   getProfileConfig,
   getCurrentProfileItem,
   getProfileItem,
@@ -63,6 +62,7 @@ import {
 } from '../resolve/server'
 import { quitWithoutCore, restartCore, startNetworkDetection, stopCore } from '../core/manager'
 import {
+  patchControlledConfigSafely,
   releaseMihomoSystemDNSLease,
   stopNetworkDetection,
   validateMihomoSystemDnsMode
@@ -237,17 +237,6 @@ async function patchAppConfigWithServiceSync(patch: Partial<AppConfig>): Promise
   })
 
   return nextConfig
-}
-
-async function patchControlledConfigSafely(patch: Partial<MihomoConfig>): Promise<void> {
-  const currentConfig = await getAppConfig()
-  const disablesMihomoListener =
-    patch.tun?.enable === false || patch.dns?.enable === false || patch.dns?.listen === ''
-  if (disablesMihomoListener && currentConfig.macosSystemDnsMode === 'mihomo-listener') {
-    await releaseMihomoSystemDNSLease()
-    await patchAppConfig({ macosSystemDnsMode: 'none' })
-  }
-  await patchControledMihomoConfig(patch)
 }
 
 async function normalizeServiceModePatch(patch: Partial<AppConfig>): Promise<Partial<AppConfig>> {

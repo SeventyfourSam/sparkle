@@ -38,6 +38,10 @@ const args = [
   'SystemConfiguration',
   '-framework',
   'CoreFoundation',
+  '-framework',
+  'Network',
+  '-framework',
+  'CryptoKit',
   '-o',
   output
 ]

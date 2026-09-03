@@ -1,19 +1,27 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { accessSync, constants, existsSync } from 'node:fs'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createConnection } from 'node:net'
 import { dnsHelperPath, dataDir } from '../utils/dirs'
 import { execWithElevationOutput } from '../utils/elevation'
-import { parseDnsLeaseTarget, type DnsHelperStatus } from './dns-helper-protocol'
+import {
+  buildDnsHelperInstallArgs,
+  dnsHelperProtocolVersion,
+  needsDnsHelperInstall,
+  parseDnsLeaseTarget,
+  type DnsHelperStatus
+} from './dns-helper-protocol'
 
 export type { DnsHelperStatus, DnsLeaseTarget } from './dns-helper-protocol'
 export { parseDnsLeaseTarget } from './dns-helper-protocol'
 
-const helperProtocolVersion = 1
 const helperSocketPath = '/var/run/sparkle-dns-helper.sock'
 const helperAuthFileName = 'dns-helper-auth'
-const helperRequestTimeout = 5000
+// A request can include bounded UDP+TCP DNS probes and a SystemConfiguration
+// commit. Keep enough headroom that a healthy helper is not mistaken for a
+// dead one during a normal network transition.
+const helperRequestTimeout = 12000
 
 let acquireInFlight: Promise<DnsHelperStatus> | undefined
 let releaseInFlight: Promise<DnsHelperStatus> | undefined
@@ -27,6 +35,11 @@ export function isMihomoDnsHelperAvailable(): boolean {
   } catch {
     return false
   }
+}
+
+/** A stale socket indicates an installed/restarting daemon worth repairing. */
+export function isMihomoDnsHelperSocketPresent(): boolean {
+  return process.platform === 'darwin' && existsSync(helperSocketPath)
 }
 
 function unsupportedStatus(error?: string): DnsHelperStatus {
@@ -69,7 +82,7 @@ async function ensureAuthFile(): Promise<string> {
     const existing = (await readFile(filePath, 'utf8')).trim()
     if (/^[0-9a-f]{64}$/i.test(existing)) {
       await chmod(filePath, 0o600)
-      return existing
+      return filePath
     }
   } catch {
     // Create the token below.
@@ -80,7 +93,12 @@ async function ensureAuthFile(): Promise<string> {
   await writeFile(temporaryPath, `${token}\n`, { mode: 0o600, flag: 'wx' })
   await chmod(temporaryPath, 0o600)
   await rename(temporaryPath, filePath)
-  return token
+  return filePath
+}
+
+async function packagedHelperBuildId(): Promise<string> {
+  const data = await readFile(dnsHelperPath())
+  return createHash('sha256').update(data).digest('hex')
 }
 
 async function readAuthFile(): Promise<string> {
@@ -143,7 +161,7 @@ async function daemonStatus(): Promise<DnsHelperStatus | undefined> {
 }
 
 function validateDaemonStatus(status: DnsHelperStatus): DnsHelperStatus {
-  if (status.version !== undefined && status.version !== helperProtocolVersion) {
+  if (status.version !== undefined && status.version !== dnsHelperProtocolVersion) {
     throw new Error('Sparkle macOS DNS helper 协议版本不兼容，请升级应用')
   }
   return status
@@ -151,41 +169,36 @@ function validateDaemonStatus(status: DnsHelperStatus): DnsHelperStatus {
 
 /**
  * Install/update the root-owned restricted LaunchDaemon only when the socket
- * is absent or its protocol is incompatible.  status/release never invoke
- * elevation, so ordinary lifecycle cleanup cannot trigger an admin prompt.
+ * is absent, its wire protocol is incompatible, or its executable identity is
+ * stale. status/release never invoke elevation, so ordinary lifecycle cleanup
+ * cannot trigger an admin prompt.
  */
 export async function ensureMihomoDnsHelperDaemon(): Promise<DnsHelperStatus> {
   if (process.platform !== 'darwin') return unsupportedStatus('仅 macOS 支持 Sparkle DNS helper')
   if (!isMihomoDnsHelperAvailable()) throw new Error('Sparkle macOS DNS helper 未随应用安装')
   if (installInFlight) return installInFlight
 
-  const existing = await daemonStatus()
-  if (existing?.supported) {
-    validateDaemonStatus(existing)
-    if (!existing.error) return existing
-    throw new Error(existing.error)
-  }
-
   installInFlight = (async () => {
+    const buildId = await packagedHelperBuildId()
+    const existing = await daemonStatus()
+    if (needsDnsHelperInstall(existing, buildId) === 'ready') {
+      if (existing?.error) throw new Error(existing.error)
+      return existing as DnsHelperStatus
+    }
+
     const authFile = await ensureAuthFile()
     const uid = process.getuid?.()
     if (!uid || uid <= 0) throw new Error('无法确定当前 macOS 应用用户')
-    const output = await execWithElevationOutput(dnsHelperPath(), [
-      'install',
-      '--json',
-      '--source',
+    const output = await execWithElevationOutput(
       dnsHelperPath(),
-      '--auth-file',
-      authFile,
-      '--uid',
-      String(uid)
-    ])
+      buildDnsHelperInstallArgs(dnsHelperPath(), authFile, uid, buildId)
+    )
     const installed = validateDaemonStatus(parseHelperOutput(output))
     if (installed.error) throw new Error(installed.error)
 
     for (let attempt = 0; attempt < 20; attempt++) {
       const ready = await daemonStatus()
-      if (ready?.supported) {
+      if (ready && needsDnsHelperInstall(ready, buildId) === 'ready') {
         validateDaemonStatus(ready)
         if (ready.error) throw new Error(ready.error)
         return ready

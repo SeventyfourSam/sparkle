@@ -1,17 +1,25 @@
 import Darwin
 import Foundation
 import Network
+import CryptoKit
 import SystemConfiguration
 
-private let helperVersion = 1
+private let helperWireVersion = 1
+private let leaseStateVersion = 1
 private let stateFile = "/var/root/Library/Application Support/Sparkle/dns-lease.json"
 private let stateDirectory = "/var/root/Library/Application Support/Sparkle"
 private let stateLockFile = "/var/root/Library/Application Support/Sparkle/dns-lease.lock"
+private let rootAuthFile = "/var/root/Library/Application Support/Sparkle/dns-helper-auth"
 private let installedHelperPath = "/Library/PrivilegedHelperTools/com.sparkle.SparkleDnsHelper"
 private let launchDaemonPath = "/Library/LaunchDaemons/com.sparkle.SparkleDnsHelper.plist"
 private let launchDaemonLabel = "com.sparkle.SparkleDnsHelper"
 private let socketPath = "/var/run/sparkle-dns-helper.sock"
 private let maximumRequestBytes = 64 * 1024
+private let maximumClientReadSeconds: Double = 5
+private let maximumPreferencesLockAttempts = 20
+private let preferencesLockRetryMicroseconds: useconds_t = 50_000
+
+private var daemonBuildID: String?
 
 private struct Target: Codable, Equatable {
     let listen: String
@@ -38,6 +46,7 @@ private struct TargetStatus: Codable {
 
 private struct Status: Codable {
     var version: Int
+    var build_id: String?
     var supported: Bool
     var active: Bool
     var healthy: Bool
@@ -106,7 +115,8 @@ private func status(
     error: String? = nil
 ) -> Status {
     Status(
-        version: helperVersion,
+        version: helperWireVersion,
+        build_id: daemonBuildID,
         supported: true,
         active: active,
         healthy: healthy,
@@ -196,7 +206,7 @@ private func readState() throws -> LeaseState? {
     guard FileManager.default.fileExists(atPath: stateFile) else { return nil }
     let data = try Data(contentsOf: URL(fileURLWithPath: stateFile))
     let state = try JSONDecoder().decode(LeaseState.self, from: data)
-    guard state.version == helperVersion else {
+    guard state.version == leaseStateVersion else {
         throw HelperError.unavailable("DNS helper 租约协议版本不兼容")
     }
     return state
@@ -241,19 +251,17 @@ private func removeState() throws {
 
 private final class NetworkContext {
     let preferences: SCPreferences
-    let networkSet: SCNetworkSet
 
     init() throws {
-        guard let preferences = SCPreferencesCreate(nil, "Sparkle DNS Helper" as CFString, nil),
-              let networkSet = SCNetworkSetCopyCurrent(preferences) else {
+        guard let preferences = SCPreferencesCreate(nil, "Sparkle DNS Helper" as CFString, nil) else {
             throw HelperError.unavailable("无法访问 macOS SystemConfiguration")
         }
         self.preferences = preferences
-        self.networkSet = networkSet
     }
 
     func services() -> [SCNetworkService] {
-        guard let services = SCNetworkSetCopyServices(networkSet) as? [SCNetworkService] else { return [] }
+        guard let networkSet = SCNetworkSetCopyCurrent(preferences),
+              let services = SCNetworkSetCopyServices(networkSet) as? [SCNetworkService] else { return [] }
         return services
     }
 
@@ -280,6 +288,28 @@ private final class NetworkContext {
     func dnsProtocol(_ service: SCNetworkService) -> SCNetworkProtocol? {
         SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeDNS)
     }
+}
+
+/**
+ * SCPreferencesLock(..., false) is deliberately used with bounded retries.
+ * Every read/check/merge/write/commit transaction gets a fresh view after the
+ * lock, so an external writer cannot race a stale snapshot into our commit.
+ */
+private func withPreferencesLock<T>(_ context: NetworkContext, _ body: () throws -> T) throws -> T {
+    var locked = false
+    for _ in 0..<maximumPreferencesLockAttempts {
+        if SCPreferencesLock(context.preferences, false) {
+            locked = true
+            break
+        }
+        usleep(preferencesLockRetryMicroseconds)
+    }
+    guard locked else {
+        throw HelperError.transaction("无法在限定时间内锁定 SystemConfiguration DNS 配置")
+    }
+    defer { _ = SCPreferencesUnlock(context.preferences) }
+    SCPreferencesSynchronize(context.preferences)
+    return try body()
 }
 
 private func configuration(_ proto: SCNetworkProtocol) -> [String: Any]? {
@@ -315,7 +345,7 @@ private func snapshot(_ context: NetworkContext, service: SCNetworkService) thro
     )
 }
 
-private func setConfiguration(
+private func setConfigurationLocked(
     _ context: NetworkContext,
     service: SCNetworkService,
     configuration: [String: Any]?,
@@ -324,10 +354,6 @@ private func setConfiguration(
     guard let proto = context.dnsProtocol(service) else {
         throw HelperError.unavailable("当前网络服务没有 DNS 协议")
     }
-    guard SCPreferencesLock(context.preferences, true) else {
-        throw HelperError.transaction("无法锁定 SystemConfiguration DNS 配置")
-    }
-    defer { _ = SCPreferencesUnlock(context.preferences) }
     let configured: Bool
     if let configuration {
         configured = SCNetworkProtocolSetConfiguration(proto, configuration as NSDictionary)
@@ -382,15 +408,21 @@ private func stopWatcher(_ state: LeaseState, keepCurrentProcess: Bool = false) 
     _ = kill(pid, SIGTERM)
 }
 
-private func restoreState(_ state: LeaseState, stopWatch: Bool = true) throws {
-    let context = try NetworkContext()
+private func restoreStateLocked(
+    _ context: NetworkContext,
+    state: LeaseState,
+    stopWatch: Bool = true
+) throws {
+    // Re-resolve the service after the preferences lock. The object used for
+    // the compare, merge, commit, and verify is therefore from one coherent
+    // SystemConfiguration transaction.
     guard let service = context.service(withID: state.serviceID) else {
         throw HelperError.conflict("原 DNS 网络服务已不存在，无法安全恢复")
     }
     let before = try snapshot(context, service: service)
     let original = try plistDictionary(state.originalConfiguration)
     guard owned(before, target: state.target) else {
-        // A commit can fail before changing anything.  Treat an already
+        // A commit can fail before changing anything. Treat an already
         // restored dictionary as an idempotent rollback, while refusing to
         // guess when the target fields are only partially changed.
         if restored(before, original: original) {
@@ -404,13 +436,23 @@ private func restoreState(_ state: LeaseState, stopWatch: Bool = true) throws {
     // If an external actor disabled the protocol while our fields stayed
     // intact, preserve that explicit change instead of re-enabling it.
     let restoreEnabled = before.enabled ? state.protocolEnabled : false
-    try setConfiguration(context, service: service, configuration: merged, enabled: restoreEnabled)
-    let after = try snapshot(context, service: service)
+    try setConfigurationLocked(context, service: service, configuration: merged, enabled: restoreEnabled)
+    guard let verifiedService = context.service(withID: state.serviceID) else {
+        throw HelperError.conflict("恢复后 DNS 网络服务已不存在")
+    }
+    let after = try snapshot(context, service: verifiedService)
     guard restored(after, original: original), after.enabled == restoreEnabled else {
         throw HelperError.transaction("DNS 恢复验证失败")
     }
     if stopWatch { stopWatcher(state) }
     try removeState()
+}
+
+private func restoreState(_ state: LeaseState, stopWatch: Bool = true) throws {
+    let context = try NetworkContext()
+    try withPreferencesLock(context) {
+        try restoreStateLocked(context, state: state, stopWatch: stopWatch)
+    }
 }
 
 private func dnsQuery(_ target: Target, tcp: Bool) -> Bool {
@@ -490,67 +532,89 @@ private func startWatchdog(_ state: inout LeaseState) {
 private func acquire(_ target: Target) throws -> Status {
     let existing = try readState()
     guard healthy(target) else {
-        if let existing { try? restoreState(existing) }
+        if let existing {
+            do {
+                try restoreState(existing)
+            } catch {
+                throw HelperError.transaction("新 DNS 目标不健康且旧租约恢复失败：\(error.localizedDescription)")
+            }
+        }
         throw HelperError.unavailable("Mihomo DNS 监听器未通过 UDP 和 TCP DNS 探活")
     }
     if let existing {
         if existing.phase == "active", existing.target == target {
             let context = try NetworkContext()
-            guard let service = context.service(withID: existing.serviceID) else {
-                throw HelperError.conflict("DNS 网络服务已变化，请先恢复旧租约")
+            return try withPreferencesLock(context) {
+                guard let service = context.service(withID: existing.serviceID) else {
+                    throw HelperError.conflict("DNS 网络服务已变化，请先恢复旧租约")
+                }
+                let current = try snapshot(context, service: service)
+                guard owned(current, target: target) else {
+                    throw HelperError.conflict("DNS 目标字段已被外部配置替换")
+                }
+                var refreshed = existing
+                stopWatcher(existing)
+                startWatchdog(&refreshed)
+                try writeState(refreshed)
+                return status(state: refreshed, active: true, healthy: true)
             }
-            let current = try snapshot(context, service: service)
-            guard owned(current, target: target) else {
-                throw HelperError.conflict("DNS 目标字段已被外部配置替换")
-            }
-            var refreshed = existing
-            stopWatcher(existing)
-            startWatchdog(&refreshed)
-            try writeState(refreshed)
-            return status(state: refreshed, active: true, healthy: true)
         }
         try restoreState(existing)
     }
 
     let context = try NetworkContext()
-    let service = try context.primaryService()
-    let before = try snapshot(context, service: service)
-    guard before.protocolExists else { throw HelperError.unavailable("当前主网络服务没有 DNS 协议") }
-    guard let original = try plistData(before.configuration) else {
-        // A nil DNS configuration is valid and is represented by a nil plist.
-        let state = LeaseState(version: helperVersion, phase: "pending", leaseID: UUID().uuidString,
+    return try withPreferencesLock(context) {
+        let service = try context.primaryService()
+        let before = try snapshot(context, service: service)
+        guard before.protocolExists else { throw HelperError.unavailable("当前主网络服务没有 DNS 协议") }
+        let original = try plistData(before.configuration)
+        // The pending record is durable before the first SystemConfiguration
+        // mutation. A crash at any point can therefore be reconciled safely.
+        let state = LeaseState(version: leaseStateVersion, phase: "pending", leaseID: UUID().uuidString,
                                target: target, serviceID: before.serviceID, protocolExists: true,
-                               protocolEnabled: before.enabled, originalConfiguration: nil, watcherPID: nil)
+                               protocolEnabled: before.enabled, originalConfiguration: original, watcherPID: nil)
         try writeState(state)
-        return try applyNewLease(state, context: context, service: service, before: before)
+        return try applyNewLeaseLocked(state, context: context)
     }
-    let state = LeaseState(version: helperVersion, phase: "pending", leaseID: UUID().uuidString,
-                           target: target, serviceID: before.serviceID, protocolExists: true,
-                           protocolEnabled: before.enabled, originalConfiguration: original, watcherPID: nil)
-    try writeState(state)
-    return try applyNewLease(state, context: context, service: service, before: before)
 }
 
-private func applyNewLease(
+private func applyNewLeaseLocked(
     _ state: LeaseState,
-    context: NetworkContext,
-    service: SCNetworkService,
-    before: Snapshot
+    context: NetworkContext
 ) throws -> Status {
+    guard let service = context.service(withID: state.serviceID) else {
+        throw HelperError.conflict("应用 DNS 租约时网络服务已不存在")
+    }
+    let before = try snapshot(context, service: service)
+    guard before.protocolExists else { throw HelperError.unavailable("当前网络服务没有 DNS 协议") }
     var configuration = before.configuration ?? [:]
     configuration["ServerAddresses"] = [state.target.address]
     configuration["ServerPort"] = NSNumber(value: state.target.port)
     do {
-        try setConfiguration(context, service: service, configuration: configuration, enabled: true)
-        let after = try snapshot(context, service: service)
+        try setConfigurationLocked(context, service: service, configuration: configuration, enabled: true)
+        guard let verifiedService = context.service(withID: state.serviceID) else {
+            throw HelperError.conflict("应用 DNS 租约后网络服务已不存在")
+        }
+        let after = try snapshot(context, service: verifiedService)
         guard owned(after, target: state.target) else { throw HelperError.transaction("DNS 应用验证失败") }
+        // A successful SCPreferences commit is not sufficient: the final
+        // runtime listener must answer real UDP and TCP DNS exchanges after
+        // the resolver target is changed. Roll back while still holding the
+        // same preferences lock if this post-apply check fails.
+        guard healthy(state.target) else {
+            throw HelperError.unavailable("DNS 应用后 Mihomo 监听器未通过 UDP 和 TCP DNS 探活")
+        }
         var active = state
         active.phase = "active"
         try writeState(active)
         startWatchdog(&active)
         return status(state: active, active: true, healthy: true)
     } catch {
-        do { try restoreState(state) } catch { throw HelperError.transaction("DNS 应用失败且回滚失败：\(error.localizedDescription)") }
+        do {
+            try restoreStateLocked(context, state: state)
+        } catch {
+            throw HelperError.transaction("DNS 应用失败且回滚失败：\(error.localizedDescription)")
+        }
         throw error
     }
 }
@@ -570,14 +634,16 @@ private func currentStatus() throws -> Status {
     guard let state = try readState() else { return status() }
     let isHealthy = healthy(state.target)
     let context = try NetworkContext()
-    guard let service = context.service(withID: state.serviceID) else {
-        return status(state: state, healthy: isHealthy, conflict: true, error: "DNS 网络服务已变化")
+    return try withPreferencesLock(context) {
+        guard let service = context.service(withID: state.serviceID) else {
+            return status(state: state, healthy: isHealthy, conflict: true, error: "DNS 网络服务已变化")
+        }
+        let current = try snapshot(context, service: service)
+        guard owned(current, target: state.target) else {
+            return status(state: state, healthy: isHealthy, conflict: true, error: "DNS 目标字段已被外部配置替换")
+        }
+        return status(state: state, active: state.phase == "active", healthy: isHealthy)
     }
-    let current = try snapshot(context, service: service)
-    guard owned(current, target: state.target) else {
-        return status(state: state, healthy: isHealthy, conflict: true, error: "DNS 目标字段已被外部配置替换")
-    }
-    return status(state: state, active: state.phase == "active", healthy: isHealthy)
 }
 
 private func reconcile() throws -> Status {
@@ -589,21 +655,42 @@ private func reconcile() throws -> Status {
         return try release()
     }
     let context = try NetworkContext()
-    let primary = try context.primaryService()
-    guard let primaryID = context.serviceID(primary) else { throw HelperError.unavailable("主网络服务缺少标识") }
-    if primaryID != state.serviceID {
-        try restoreState(state)
+    let serviceChanged = try withPreferencesLock(context) { () -> Bool in
+        let primary = try context.primaryService()
+        guard let primaryID = context.serviceID(primary) else {
+            throw HelperError.unavailable("主网络服务缺少标识")
+        }
+        if primaryID != state.serviceID {
+            try restoreStateLocked(context, state: state)
+            return true
+        }
+        let current = try snapshot(context, service: primary)
+        guard owned(current, target: state.target) else {
+            return false
+        }
+        var refreshed = state
+        stopWatcher(state)
+        startWatchdog(&refreshed)
+        try writeState(refreshed)
+        return false
+    }
+    if serviceChanged {
         return try acquire(state.target)
     }
-    let current = try snapshot(context, service: primary)
-    guard owned(current, target: state.target) else {
-        return status(state: state, healthy: true, conflict: true, error: "DNS 目标字段已被外部配置替换")
+    // Re-read under the lock after the possible refresh to produce a truthful
+    // conflict status without using stale SC objects.
+    let contextAfter = try NetworkContext()
+    return try withPreferencesLock(contextAfter) {
+        guard let refreshedState = try readState(),
+              let service = contextAfter.service(withID: refreshedState.serviceID) else {
+            return status()
+        }
+        let current = try snapshot(contextAfter, service: service)
+        guard owned(current, target: refreshedState.target) else {
+            return status(state: refreshedState, healthy: true, conflict: true, error: "DNS 目标字段已被外部配置替换")
+        }
+        return status(state: refreshedState, active: refreshedState.phase == "active", healthy: true)
     }
-    var refreshed = state
-    stopWatcher(state)
-    startWatchdog(&refreshed)
-    try writeState(refreshed)
-    return status(state: refreshed, active: true, healthy: true)
 }
 
 private func requireRoot() throws {
@@ -623,18 +710,89 @@ private func validateAuthFile(_ path: String?, uid: uid_t) throws -> String {
     guard let path, path.hasPrefix("/"), path.hasSuffix("/dns-helper-auth") else {
         throw HelperError.invalid("DNS helper 认证文件路径无效")
     }
+    _ = try readValidatedAuthFile(path, owner: uid)
+    return path
+}
+
+private func readValidatedAuthFile(_ path: String, owner: uid_t) throws -> String {
+    let descriptor = open(path, O_RDONLY | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw HelperError.invalid("DNS helper 认证文件不存在或不可打开") }
+    defer { close(descriptor) }
     var info = stat()
-    guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
-        throw HelperError.invalid("DNS helper 认证文件不存在或不是普通文件")
+    guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+          info.st_uid == owner, (info.st_mode & 0o077) == 0 else {
+        throw HelperError.invalid("DNS helper 认证文件必须由指定用户拥有且仅用户可读")
     }
-    guard info.st_uid == uid, (info.st_mode & 0o077) == 0 else {
-        throw HelperError.invalid("DNS helper 认证文件必须由应用用户拥有且仅用户可读")
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 256)
+    while true {
+        let count = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
+            guard let baseAddress = rawBuffer.baseAddress else { return -1 }
+            return read(descriptor, baseAddress, rawBuffer.count)
+        }
+        if count < 0 { throw HelperError.invalid("读取 DNS helper 认证文件失败") }
+        if count == 0 { break }
+        data.append(contentsOf: buffer.prefix(count))
+        if data.count > 256 { throw HelperError.invalid("DNS helper 认证文件过大") }
     }
-    let token = try String(contentsOfFile: path, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let token = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+        throw HelperError.invalid("DNS helper 认证文件格式无效")
+    }
     guard token.count == 64, token.allSatisfy({ $0.isHexDigit }) else {
         throw HelperError.invalid("DNS helper 认证文件格式无效")
     }
-    return path
+    return token
+}
+
+private func writePrivateDataAtomically(_ data: Data, path: String, mode: mode_t, owner: uid_t, group: gid_t) throws {
+    let temporaryPath = path + ".tmp-" + UUID().uuidString
+    let descriptor = open(temporaryPath, O_CREAT | O_EXCL | O_WRONLY, mode)
+    guard descriptor >= 0 else { throw HelperError.transaction("无法创建 DNS helper 私有文件") }
+    let writeResult = data.withUnsafeBytes { rawBuffer -> Bool in
+        guard let baseAddress = rawBuffer.baseAddress else { return true }
+        var written = 0
+        while written < rawBuffer.count {
+            let count = write(descriptor, baseAddress.advanced(by: written), rawBuffer.count - written)
+            if count <= 0 { return false }
+            written += count
+        }
+        return true
+    }
+    _ = fsync(descriptor)
+    close(descriptor)
+    guard writeResult, chmod(temporaryPath, mode) == 0, chown(temporaryPath, owner, group) == 0 else {
+        try? FileManager.default.removeItem(atPath: temporaryPath)
+        throw HelperError.transaction("无法保护 DNS helper 私有文件")
+    }
+    guard rename(temporaryPath, path) == 0 else {
+        try? FileManager.default.removeItem(atPath: temporaryPath)
+        throw HelperError.transaction("无法原子保存 DNS helper 私有文件")
+    }
+    guard chmod(path, mode) == 0, chown(path, owner, group) == 0 else {
+        throw HelperError.transaction("无法保护 DNS helper 私有文件")
+    }
+}
+
+private func writeRootAuthAtomically(_ token: String) throws {
+    guard token.count == 64, token.allSatisfy({ $0.isHexDigit }) else {
+        throw HelperError.invalid("DNS helper 认证文件格式无效")
+    }
+    try ensureStateDirectory()
+    try writePrivateDataAtomically(
+        Data((token + "\n").utf8),
+        path: rootAuthFile,
+        mode: mode_t(0o600),
+        owner: 0,
+        group: 0
+    )
+}
+
+private func readRootAuth() throws -> String {
+    do {
+        return try readValidatedAuthFile(rootAuthFile, owner: 0)
+    } catch {
+        throw HelperError.unavailable("DNS helper root 认证材料不存在或权限不安全")
+    }
 }
 
 private func plistEscape(_ value: String) -> String {
@@ -647,16 +805,60 @@ private func plistEscape(_ value: String) -> String {
 }
 
 private func validPackagedSource(_ path: String?) throws -> String {
-    guard let path, path.hasPrefix("/"), URL(fileURLWithPath: path).lastPathComponent == "sparkle-dns-helper" else {
+    guard let path, path.hasPrefix("/"),
+          URL(fileURLWithPath: path).lastPathComponent == "sparkle-dns-helper",
+          URL(fileURLWithPath: path).standardizedFileURL.path == path,
+          !path.contains("/../") else {
         throw HelperError.invalid("DNS helper 源文件路径无效")
     }
-    let allowed = path.contains("/Contents/Resources/files/") || path.contains("/extra/files/")
+    let components = URL(fileURLWithPath: path).pathComponents
+    let packagedSuffix = ["Contents", "Resources", "files", "sparkle-dns-helper"]
+    let developmentSuffix = ["extra", "files", "sparkle-dns-helper"]
+    let allowed = components.suffix(packagedSuffix.count).elementsEqual(packagedSuffix) ||
+        components.suffix(developmentSuffix.count).elementsEqual(developmentSuffix)
     guard allowed else { throw HelperError.invalid("DNS helper 源文件不在 Sparkle 资源目录") }
     var info = stat()
     guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, (info.st_mode & S_IXUSR) != 0 else {
         throw HelperError.invalid("DNS helper 源文件不可执行")
     }
     return path
+}
+
+private func validateBuildID(_ value: String?) throws -> String {
+    guard let value, value.count == 64, value.allSatisfy({ $0.isHexDigit }) else {
+        throw HelperError.invalid("DNS helper 构建标识无效")
+    }
+    return value.lowercased()
+}
+
+private func readPackagedExecutable(_ path: String, expectedBuildID: String) throws -> Data {
+    let descriptor = open(path, O_RDONLY)
+    guard descriptor >= 0 else { throw HelperError.invalid("无法打开 DNS helper 打包源文件") }
+    defer { close(descriptor) }
+    var info = stat()
+    guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+          (info.st_mode & S_IXUSR) != 0 else {
+        throw HelperError.invalid("DNS helper 打包源文件不可执行")
+    }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while true {
+        let count = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
+            guard let baseAddress = rawBuffer.baseAddress else { return -1 }
+            return read(descriptor, baseAddress, rawBuffer.count)
+        }
+        if count < 0 { throw HelperError.invalid("读取 DNS helper 打包源文件失败") }
+        if count == 0 { break }
+        data.append(contentsOf: buffer.prefix(count))
+        if data.count > 128 * 1024 * 1024 {
+            throw HelperError.invalid("DNS helper 打包源文件过大")
+        }
+    }
+    let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    guard digest == expectedBuildID.lowercased() else {
+        throw HelperError.invalid("DNS helper 打包源文件校验失败")
+    }
+    return data
 }
 
 private func runLaunchctl(_ arguments: [String], allowFailure: Bool = false) throws {
@@ -683,7 +885,7 @@ private func daemonIsLoaded() -> Bool {
     }
 }
 
-private func writeLaunchDaemonPlist(authFile: String, uid: uid_t) throws {
+private func writeLaunchDaemonPlist(uid: uid_t, buildID: String) throws {
     let xml = """
     <?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -696,9 +898,11 @@ private func writeLaunchDaemonPlist(authFile: String, uid: uid_t) throws {
     <string>\(installedHelperPath)</string>
     <string>daemon</string>
     <string>--auth-file</string>
-    <string>\(plistEscape(authFile))</string>
+    <string>\(plistEscape(rootAuthFile))</string>
     <string>--uid</string>
     <string>\(uid)</string>
+    <string>--build-id</string>
+    <string>\(plistEscape(buildID))</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -723,11 +927,18 @@ private func writeLaunchDaemonPlist(authFile: String, uid: uid_t) throws {
     }
 }
 
-private func installDaemon(source: String?, authFile: String?, uidValue: String?) throws -> Status {
+private func installDaemon(source: String?, authFile: String?, uidValue: String?, buildID: String?) throws -> Status {
     try requireRoot()
     let sourcePath = try validPackagedSource(source)
     let uid = try validateUID(uidValue)
     let authPath = try validateAuthFile(authFile, uid: uid)
+    let expectedBuildID = try validateBuildID(buildID)
+    // Open, fstat, copy, and hash one exact descriptor. This avoids the old
+    // path-reopen TOCTOU and rejects a swapped lookalike source.
+    let sourceData = try readPackagedExecutable(sourcePath, expectedBuildID: expectedBuildID)
+    let token = try readValidatedAuthFile(authPath, owner: uid)
+    try ensureStateDirectory()
+    try writeRootAuthAtomically(token)
 
     do {
         // Stop the old daemon before replacing its root-owned executable.  Its
@@ -738,8 +949,8 @@ private func installDaemon(source: String?, authFile: String?, uidValue: String?
         unlink(socketPath)
 
         let temporaryPath = installedHelperPath + ".tmp-" + UUID().uuidString
-        try FileManager.default.copyItem(atPath: sourcePath, toPath: temporaryPath)
-        guard chmod(temporaryPath, mode_t(0o755)) == 0, chown(temporaryPath, 0, 0) == 0 else {
+        try writePrivateDataAtomically(sourceData, path: temporaryPath, mode: mode_t(0o700), owner: 0, group: 0)
+        guard chmod(temporaryPath, mode_t(0o755)) == 0 else {
             try? FileManager.default.removeItem(atPath: temporaryPath)
             throw HelperError.transaction("无法保护已安装的 DNS helper")
         }
@@ -747,7 +958,8 @@ private func installDaemon(source: String?, authFile: String?, uidValue: String?
             try? FileManager.default.removeItem(atPath: temporaryPath)
             throw HelperError.transaction("无法原子更新已安装的 DNS helper")
         }
-        try writeLaunchDaemonPlist(authFile: authPath, uid: uid)
+        try writeLaunchDaemonPlist(uid: uid, buildID: expectedBuildID)
+        daemonBuildID = expectedBuildID
         try runLaunchctl(["bootstrap", "system", launchDaemonPath])
         try runLaunchctl(["kickstart", "-k", "system/\(launchDaemonLabel)"], allowFailure: true)
         return status()
@@ -770,14 +982,16 @@ private func uninstallDaemon() throws -> Status {
         try runLaunchctl(["bootout", "system/\(launchDaemonLabel)"])
     }
     unlink(socketPath)
-    try? FileManager.default.removeItem(atPath: launchDaemonPath)
-    try? FileManager.default.removeItem(atPath: installedHelperPath)
+    if FileManager.default.fileExists(atPath: launchDaemonPath) {
+        try FileManager.default.removeItem(atPath: launchDaemonPath)
+    }
+    if FileManager.default.fileExists(atPath: installedHelperPath) {
+        try FileManager.default.removeItem(atPath: installedHelperPath)
+    }
+    if FileManager.default.fileExists(atPath: rootAuthFile) {
+        try FileManager.default.removeItem(atPath: rootAuthFile)
+    }
     return status()
-}
-
-private func readAuth(_ path: String, uid: uid_t) throws -> String {
-    _ = try validateAuthFile(path, uid: uid)
-    return try String(contentsOfFile: path, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 private func constantTimeEqual(_ left: String, _ right: String) -> Bool {
@@ -792,7 +1006,14 @@ private func constantTimeEqual(_ left: String, _ right: String) -> Bool {
 private func readSocketLine(_ descriptor: Int32) -> Data? {
     var data = Data()
     var buffer = [UInt8](repeating: 0, count: 4096)
+    let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(maximumClientReadSeconds * 1_000_000_000)
     while data.count < maximumRequestBytes {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if now >= deadline { return nil }
+        let remainingMilliseconds = Int32((deadline - now) / 1_000_000)
+        var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+        let ready = poll(&pollDescriptor, 1, max(1, remainingMilliseconds))
+        if ready <= 0 || pollDescriptor.revents & Int16(POLLIN) == 0 { return nil }
         let count = read(descriptor, &buffer, buffer.count)
         if count <= 0 { break }
         data.append(contentsOf: buffer.prefix(count))
@@ -875,11 +1096,21 @@ private func daemonSocket() throws -> Int32 {
     return descriptor
 }
 
-private func daemon(_ authFile: String?, uidValue: String?) throws -> Never {
+private func daemonReconcile() {
+    do {
+        _ = try withLeaseLock { try reconcile() }
+    } catch {
+        let message = "Sparkle DNS helper reconcile failed: \(error.localizedDescription)\n"
+        FileHandle.standardError.write(Data(message.utf8))
+    }
+}
+
+private func daemon(_ authFile: String?, uidValue: String?, buildID: String?) throws -> Never {
     try requireRoot()
-    guard let authFile else { throw HelperError.invalid("daemon 缺少认证文件") }
+    guard authFile == rootAuthFile else { throw HelperError.invalid("daemon 认证材料必须来自 root 私有路径") }
     let uid = try validateUID(uidValue)
-    let auth = try readAuth(authFile, uid: uid)
+    daemonBuildID = try validateBuildID(buildID)
+    let auth = try readRootAuth()
     let descriptor = try daemonSocket()
     guard chown(socketPath, uid, 0) == 0 else {
         close(descriptor)
@@ -889,13 +1120,13 @@ private func daemon(_ authFile: String?, uidValue: String?) throws -> Never {
 
     // Reconcile pending/active state before accepting app requests.  A reboot
     // therefore cannot leave a dead Mihomo listener as the default resolver.
-    _ = try? withLeaseLock { try reconcile() }
+    daemonReconcile()
 
     while true {
         var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
         let ready = poll(&pollDescriptor, 1, 5000)
         if ready == 0 {
-            _ = try? withLeaseLock { try reconcile() }
+            daemonReconcile()
             continue
         }
         guard ready > 0, pollDescriptor.revents & Int16(POLLIN) != 0 else { continue }
@@ -932,13 +1163,18 @@ do {
             try installDaemon(
                 source: argument("--source", in: arguments),
                 authFile: argument("--auth-file", in: arguments),
-                uidValue: argument("--uid", in: arguments)
+                uidValue: argument("--uid", in: arguments),
+                buildID: argument("--build-id", in: arguments)
             )
         }
     case "uninstall":
         result = try withLeaseLock { try uninstallDaemon() }
     case "daemon":
-        try daemon(argument("--auth-file", in: arguments), uidValue: argument("--uid", in: arguments))
+        try daemon(
+            argument("--auth-file", in: arguments),
+            uidValue: argument("--uid", in: arguments),
+            buildID: argument("--build-id", in: arguments)
+        )
     default:
         throw HelperError.invalid("仅支持 install、uninstall、daemon、acquire、release、status、reconcile")
     }

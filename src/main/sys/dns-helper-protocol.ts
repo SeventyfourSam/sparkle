@@ -1,4 +1,7 @@
 import { isIP } from 'node:net'
+import path from 'node:path'
+
+export const dnsHelperProtocolVersion = 1
 
 export interface DnsLeaseTarget {
   listen: string
@@ -8,6 +11,8 @@ export interface DnsLeaseTarget {
 
 export interface DnsHelperStatus {
   version?: number
+  /** Digest of the installed helper executable, independent of wire/schema version. */
+  build_id?: string
   supported: boolean
   active: boolean
   healthy: boolean
@@ -36,6 +41,71 @@ export interface DnsLeaseState {
 
 export type ParseDnsTargetResult =
   { ok: true; value: DnsLeaseTarget } | { ok: false; error: string }
+
+export type DnsHelperInstallDecision = 'ready' | 'install'
+
+/**
+ * Decide whether the packaged helper must replace the daemon reachable on the
+ * socket.  A missing or incompatible wire version is an install/update case;
+ * it is not a reason to strand an existing v1 lease.
+ */
+export function needsDnsHelperInstall(
+  existing: Pick<DnsHelperStatus, 'supported' | 'version' | 'build_id'> | undefined,
+  packagedBuildId: string
+): DnsHelperInstallDecision {
+  if (
+    existing?.supported &&
+    existing.version === dnsHelperProtocolVersion &&
+    existing.build_id === packagedBuildId
+  ) {
+    return 'ready'
+  }
+  return 'install'
+}
+
+/** Keep the privileged installer argument contract pure and testable. */
+export function buildDnsHelperInstallArgs(
+  source: string,
+  authPath: string,
+  uid: number,
+  buildId: string
+): string[] {
+  if (!path.isAbsolute(authPath) || path.basename(authPath) !== 'dns-helper-auth') {
+    throw new Error('DNS helper installer requires an absolute auth file path')
+  }
+  return [
+    'install',
+    '--json',
+    '--source',
+    source,
+    '--auth-file',
+    authPath,
+    '--uid',
+    String(uid),
+    '--build-id',
+    buildId
+  ]
+}
+
+export type DnsLeaseReconcileDecision = 'noop' | 'release' | 'error'
+
+/**
+ * Disabled mode is a clean no-op when no daemon/socket is installed, but a
+ * daemon-owned active lease must be released explicitly.
+ */
+export function decideDnsLeaseReconcile(
+  mode: 'none' | 'mihomo-listener',
+  status: Pick<DnsHelperStatus, 'supported' | 'active' | 'conflict' | 'error'>
+): DnsLeaseReconcileDecision {
+  if (!status.supported) return mode === 'mihomo-listener' ? 'error' : 'noop'
+  if (status.conflict || status.error) return 'error'
+  if (mode === 'none' && status.active) return 'release'
+  return 'noop'
+}
+
+export function isDisablingMihomoListenerPatch(patch: Partial<MihomoConfig>): boolean {
+  return patch.tun?.enable === false || patch.dns?.enable === false || patch.dns?.listen === ''
+}
 
 /** Parse and constrain the only target accepted by the privileged helper. */
 export function parseDnsLeaseTarget(value: string | undefined): ParseDnsTargetResult {

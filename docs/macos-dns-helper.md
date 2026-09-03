@@ -11,25 +11,34 @@ primary network service through public SystemConfiguration APIs. It never
 edits `/etc/resolver`, invokes `scutil`, or executes arbitrary commands.
 
 The helper persists a root-only pending/active lease under
-`/var/root/Library/Application Support/Sparkle/dns-lease.json` and serializes
-all lease mutations with a file lock plus an SCPreferences lock. It writes the
-pending snapshot before mutation, verifies the committed fields, and restores
-only the Sparkle-owned `ServerAddresses` and `ServerPort` fields. If either
-field was externally replaced, the helper reports a conflict and leaves the
-current configuration untouched.
+`/var/root/Library/Application Support/Sparkle/dns-lease.json` and its
+root-owned authentication material under
+`/var/root/Library/Application Support/Sparkle/dns-helper-auth`. The daemon
+does not read the mutable per-user application-data copy during boot, so reset
+data, FileVault timing, and app uninstall cannot strand a lease or cause a
+launchd restart loop. Sparkle rotates the root copy atomically during an
+explicit install/update. All lease mutations use a file lock plus one bounded
+SCPreferences transaction: the preferences are synchronized after locking,
+then read, compared, merged, committed, applied, and verified before unlock.
+The pending snapshot is written before mutation, and restore changes only the
+Sparkle-owned `ServerAddresses` and `ServerPort` fields. If either field was
+externally replaced, the helper reports a conflict and leaves the current
+configuration untouched.
 
 The LaunchDaemon is `RunAtLoad`/`KeepAlive` and reconciles pending or active
 state before accepting requests and every few seconds thereafter. It validates
 the listener with UDP and TCP DNS exchanges, restores an unhealthy lease, and
 migrates a lease when macOS changes the primary network service. A reboot thus
 cannot leave a dead non-53 resolver lease without a recovery process. Helper
-upgrade stops the old daemon, atomically replaces the root-owned executable and
-plist, and starts the same daemon; the persisted lease is reconciled by the new
+upgrade compares the packaged executable's SHA-256 build identity with daemon
+status; a mismatch or wire-version mismatch triggers one elevated install
+attempt. The installer hashes the exact opened executable before copying it,
+atomically replaces the root-owned executable/plist, and starts the same
+daemon; the v1 persisted lease remains readable and is reconciled by the new
 process. Uninstall restores the lease first and refuses to remove the daemon
 when a field-aware conflict prevents safe restoration. Normal status and
 release use the authenticated socket and do not prompt for administrator
-credentials; an absent or broken daemon is repaired with one elevated install
-attempt so a resolver lease is never silently abandoned.
+credentials.
 
 `pnpm build:dns-helper -- --arch=arm64` and `--arch=x64` compile the Swift
 source with SystemConfiguration/CoreFoundation against macOS 10.15. The

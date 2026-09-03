@@ -1,13 +1,7 @@
 import { ChildProcess, spawn } from 'child_process'
 import { dataDir, coreLogPath, mihomoCorePath } from '../utils/dirs'
 import { generateProfile, getRuntimeConfig } from './factory'
-import {
-  getAppConfig,
-  getControledMihomoConfig,
-  getProfileConfig,
-  patchAppConfig,
-  patchControledMihomoConfig
-} from '../config'
+import { getAppConfig, getControledMihomoConfig, getProfileConfig, patchAppConfig } from '../config'
 import { app, ipcMain } from 'electron'
 import {
   startMihomoTraffic,
@@ -46,6 +40,7 @@ import { createCoreHookWaiter, createCoreStartupHook } from './startupHook'
 import { stopChildProcess } from './process-control'
 import {
   acquireMihomoSystemDNSLease,
+  patchControlledConfigSafely,
   recoverDNS,
   reconcileMihomoSystemDNSLease,
   releaseMihomoSystemDNSLease,
@@ -560,7 +555,11 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
                 providerTracker.track(logLine)
 
                 if (isTunPermissionError(logLine)) {
-                  patchControledMihomoConfig({ tun: { enable: false } })
+                  try {
+                    await patchControlledConfigSafely({ tun: { enable: false } })
+                  } catch (error) {
+                    await appendAppLog(`[Manager]: failed to safely disable Tun, ${error}\n`)
+                  }
                   mainWindow?.webContents.send('controledMihomoConfigUpdated')
                   ipcMain.emit('updateTrayMenu')
                   reject('虚拟网卡启动失败，前往内核设置页尝试手动授予内核权限')

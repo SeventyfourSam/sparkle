@@ -2,17 +2,27 @@ import { execFile } from 'child_process'
 import { net } from 'electron'
 import os from 'os'
 import { promisify } from 'util'
-import { getAppConfig, getControledMihomoConfig, patchAppConfig } from '../config'
+import {
+  getAppConfig,
+  getControledMihomoConfig,
+  patchAppConfig,
+  patchControledMihomoConfig
+} from '../config'
 import { getRuntimeConfig } from './factory'
 import { setSysDns } from '../service/api'
 import {
   acquireMihomoDnsLease,
   ensureMihomoDnsHelperDaemon,
   isMihomoDnsHelperAvailable,
+  isMihomoDnsHelperSocketPresent,
   releaseMihomoDnsLease,
   reconcileMihomoDnsLease
 } from '../sys/dns-helper'
-import { parseDnsLeaseTarget } from '../sys/dns-helper-protocol'
+import {
+  decideDnsLeaseReconcile,
+  isDisablingMihomoListenerPatch,
+  parseDnsLeaseTarget
+} from '../sys/dns-helper-protocol'
 import { triggerSysProxy } from '../sys/sysproxy'
 import { appendAppLog } from '../utils/log'
 
@@ -165,9 +175,9 @@ export async function releaseMihomoSystemDNSLease(): Promise<void> {
   // left a root-owned lease behind.  In the normal disabled mode do not invoke
   // the helper (and do not prompt for elevation) on every ordinary core stop.
   if (appConfig.macosSystemDnsMode !== 'mihomo-listener') return
-  // If launchd has not restarted after a crash/update, ensure it is present
-  // once. The normal path is a socket request and never prompts.
-  await ensureMihomoDnsHelperDaemon()
+  // Release is deliberately socket-only. If launchd is unavailable we fail
+  // closed and keep the Mihomo core alive rather than prompting during a
+  // routine stop/toggle or changing DNS without verification.
   const released = await releaseMihomoDnsLease()
   if (!released.supported || released.active || released.conflict || released.error) {
     throw new Error(released.error || '系统 DNS 仍指向 Mihomo 监听器，无法安全停止内核')
@@ -177,6 +187,24 @@ export async function releaseMihomoSystemDNSLease(): Promise<void> {
   }
 }
 
+/**
+ * Every internal path that can turn off TUN/DNS/listen must use this helper.
+ * Releasing the resolver lease and clearing its durable mode marker happen
+ * before the controlled config is changed, so a failed restore keeps the
+ * listener and its old configuration alive for safe recovery.
+ */
+export async function patchControlledConfigSafely(patch: Partial<MihomoConfig>): Promise<void> {
+  const currentConfig = await getAppConfig()
+  if (
+    isDisablingMihomoListenerPatch(patch) &&
+    currentConfig.macosSystemDnsMode === 'mihomo-listener'
+  ) {
+    await releaseMihomoSystemDNSLease()
+    await patchAppConfig({ macosSystemDnsMode: 'none' })
+  }
+  await patchControledMihomoConfig(patch)
+}
+
 /** Reconcile an interrupted helper transaction without acquiring anything. */
 export async function reconcileMihomoSystemDNSLease(): Promise<void> {
   if (process.platform !== 'darwin') return
@@ -184,12 +212,31 @@ export async function reconcileMihomoSystemDNSLease(): Promise<void> {
   const listenerMode = appConfig.macosSystemDnsMode === 'mihomo-listener'
   if (listenerMode) await ensureMihomoDnsHelperDaemon()
   if (!isMihomoDnsHelperAvailable()) return
-  const status = await reconcileMihomoDnsLease()
-  if (listenerMode && !status.supported) {
-    throw new Error(status.error || 'macOS DNS helper daemon 不可用，无法安全 reconcile 系统 DNS')
+  let status = await reconcileMihomoDnsLease()
+  // If app data was reset, the per-user token may no longer match the
+  // root-owned daemon token. A present socket proves this is an installed
+  // daemon recovery case (not the ordinary no-daemon startup no-op), so one
+  // explicit ensure rotates the token and lets us release a stale lease.
+  if (!listenerMode && !status.supported && isMihomoDnsHelperSocketPresent()) {
+    await ensureMihomoDnsHelperDaemon()
+    status = await reconcileMihomoDnsLease()
   }
-  if (status.conflict || status.error) {
-    throw new Error(status.error || 'macOS DNS helper 检测到外部 DNS 冲突')
+  const decision = decideDnsLeaseReconcile(listenerMode ? 'mihomo-listener' : 'none', status)
+  if (decision === 'noop') return
+  if (decision === 'error') {
+    throw new Error(
+      status.error ||
+        (listenerMode
+          ? 'macOS DNS helper daemon 不可用，无法安全 reconcile 系统 DNS'
+          : 'macOS DNS helper 检测到外部 DNS 冲突')
+    )
+  }
+
+  // Disabled mode still cleans up a lease that the daemon owns. This branch
+  // is socket-only and therefore never prompts for administrator access.
+  const released = await releaseMihomoDnsLease()
+  if (!released.supported || released.active || released.conflict || released.error) {
+    throw new Error(released.error || 'macOS DNS helper stale lease 无法安全释放')
   }
 }
 
