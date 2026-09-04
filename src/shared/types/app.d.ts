@@ -97,8 +97,6 @@ interface AppConfig {
   customSubStoreUrl?: string
   diffWorkDir?: boolean
   autoSetDNSMode?: 'none' | 'exec' | 'service'
-  /** Darwin-only: point the default resolver at the final Mihomo dns.listen. */
-  macosSystemDnsMode?: 'none' | 'mihomo-listener'
   originDNS?: string
   useWindowFrame: boolean
   enableWindowDrag: boolean

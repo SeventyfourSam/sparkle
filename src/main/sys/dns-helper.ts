@@ -20,9 +20,8 @@ export { parseDnsLeaseTarget } from './dns-helper-protocol'
 
 const helperSocketPath = '/var/run/sparkle-dns-helper.sock'
 const helperAuthFileName = 'dns-helper-auth'
-// Target changes can include a pre-probe, old-service restore, new-service
-// transaction, and post-probe. Keep conservative headroom so a live root
-// transaction cannot outlast the client timeout and appear misleadingly dead.
+// Target changes can include listener probes plus old-service restore and
+// new-service transactions. Keep conservative headroom around the root call.
 const helperRequestTimeout = 20000
 
 let acquireInFlight: Promise<DnsHelperStatus> | undefined
@@ -210,7 +209,7 @@ export async function acquireMihomoDnsLease(listen: string): Promise<DnsHelperSt
     .then((status) => {
       validateDaemonStatus(status)
       if (!status.supported || status.error || !status.active || !status.healthy) {
-        throw new Error(status.error || 'macOS DNS helper 未能验证 Mihomo DNS 监听器')
+        throw new Error(status.error || 'macOS DNS helper 未检测到 Mihomo DNS 监听端口')
       }
       return status
     })

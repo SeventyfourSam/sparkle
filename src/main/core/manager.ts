@@ -41,9 +41,11 @@ import { stopChildProcess } from './process-control'
 import { recoverDNS, setPublicDNS, startNetworkDetectionController } from './network'
 import {
   acquireMihomoSystemDNSLease,
+  hasMihomoDnsListener,
   patchControlledConfigSafely,
   reconcileMihomoSystemDNSLease,
-  releaseMihomoSystemDNSLease
+  releaseMihomoSystemDNSLease,
+  shouldManageMihomoSystemDns
 } from '../sys/mihomo-system-dns'
 import { checkProfile } from './profile-check'
 import {
@@ -235,8 +237,8 @@ async function completeCoreInitialization(logLevel?: LogLevel): Promise<void> {
     tasks.push(delay(100).then(() => patchMihomoConfig({ 'log-level': logLevel })))
   }
 
-  // The core is fully ready at this point. The local macOS helper performs
-  // bounded UDP/TCP DNS exchanges before mutating SystemConfiguration.
+  // The core is fully ready at this point. The local macOS helper verifies
+  // that dns.listen is accepting connections before changing the resolver.
   tasks.push(acquireMihomoSystemDNSLease())
 
   await Promise.all(tasks)
@@ -388,11 +390,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     await stopCore()
   }
   setMihomoLogSource('out')
-  if (
-    tun?.enable &&
-    autoSetDNSMode !== 'none' &&
-    appConfig.macosSystemDnsMode !== 'mihomo-listener'
-  ) {
+  if (tun?.enable && autoSetDNSMode !== 'none' && !hasMihomoDnsListener(controlledMihomoConfig)) {
     try {
       await setPublicDNS()
     } catch (error) {
@@ -554,13 +552,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
 
                 if (isTunPermissionError(logLine)) {
                   try {
-                    const modeChanged = await patchControlledConfigSafely({
-                      tun: { enable: false }
-                    })
-                    if (modeChanged) {
-                      mainWindow?.webContents.send('appConfigUpdated')
-                      ipcMain.emit('updateFloatingWindow')
-                    }
+                    await patchControlledConfigSafely({ tun: { enable: false } })
                   } catch (error) {
                     await appendAppLog(`[Manager]: failed to safely disable Tun, ${error}\n`)
                   }
@@ -622,9 +614,7 @@ export async function stopCore(force = false): Promise<void> {
   serviceCoreRuntime.pauseAutoResume()
 
   try {
-    // Reconcile pending/active helper state before any stop path can tear
-    // down the listener that the system resolver may still be using.
-    await reconcileMihomoSystemDNSLease()
+    // Restore the resolver before any stop path tears down dns.listen.
     await releaseMihomoSystemDNSLease()
   } catch (error) {
     await appendAppLog(`[Manager]: restore macOS system DNS failed, ${error}\n`)
@@ -774,18 +764,22 @@ export async function restartCore(): Promise<void> {
 
 export async function keepCoreAlive(): Promise<void> {
   try {
-    const { corePermissionMode = 'elevated', macosSystemDnsMode = 'none' } = await getAppConfig()
+    const [appConfig, controlledConfig] = await Promise.all([
+      getAppConfig(),
+      getControledMihomoConfig()
+    ])
+    const { corePermissionMode = 'elevated' } = appConfig
     if (corePermissionMode === 'service') {
       return
     }
 
-    // The running core already owns the healthy listener in this mode.  Keep
+    // The running core already owns the configured listener. Keep
     // it (and its resolver lease) alive when the UI enters lightweight mode;
     // restarting a detached core here would otherwise release the lease before
     // the detached startup path can validate and reacquire it.
     if (
       process.platform === 'darwin' &&
-      macosSystemDnsMode === 'mihomo-listener' &&
+      shouldManageMihomoSystemDns(appConfig.controlDns !== false, controlledConfig) &&
       directCoreState.child
     ) {
       if (directCoreState.child.pid) {

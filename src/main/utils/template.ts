@@ -63,7 +63,6 @@ export const defaultConfig: AppConfig = {
   autoLightweightMode: 'core',
   coreStartupMode: 'post-up',
   serviceRunMode: 'auto',
-  macosSystemDnsMode: 'none',
   delayTestConcurrency: 50,
   delayTestUseGroupApi: false,
   delayTestUrlScope: 'group',

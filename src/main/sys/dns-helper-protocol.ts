@@ -17,6 +17,7 @@ export interface DnsHelperStatus {
   auth_failed?: boolean
   supported: boolean
   active: boolean
+  /** The configured TCP endpoint is accepting connections; DNS answers are not validated. */
   healthy: boolean
   mode?: 'mihomo-listener'
   lease_id?: string
@@ -107,30 +108,44 @@ export function buildDnsHelperInstallArgs(
 
 export type DnsLeaseReconcileDecision = 'noop' | 'release' | 'error'
 
-/**
- * Disabled mode is a clean no-op when no daemon/socket is installed, but a
- * daemon-owned active lease must be released explicitly.
- */
+/** No configured listener is a no-op unless the daemon still owns a lease. */
 export function decideDnsLeaseReconcile(
-  mode: 'none' | 'mihomo-listener',
-  status: Pick<DnsHelperStatus, 'supported' | 'active' | 'conflict' | 'error' | 'auth_failed'>
+  listenerExpected: boolean,
+  status: Pick<
+    DnsHelperStatus,
+    'supported' | 'active' | 'lease_id' | 'conflict' | 'error' | 'auth_failed'
+  >
 ): DnsLeaseReconcileDecision {
-  if (status.auth_failed) return mode === 'mihomo-listener' ? 'error' : 'noop'
-  if (!status.supported) return mode === 'mihomo-listener' ? 'error' : 'noop'
+  if (status.auth_failed) return listenerExpected ? 'error' : 'noop'
+  if (!status.supported) return listenerExpected ? 'error' : 'noop'
+  if (!listenerExpected && (status.active || status.lease_id)) return 'release'
   if (status.conflict || status.error) return 'error'
-  if (mode === 'none' && status.active) return 'release'
   return 'noop'
 }
 
-export function isDisablingMihomoListenerPatch(patch: Partial<MihomoConfig>): boolean {
-  return patch.tun?.enable === false || patch.dns?.enable === false || patch.dns?.listen === ''
+export function hasMihomoDnsListener(config: Partial<MihomoConfig>): boolean {
+  return typeof config.dns?.listen === 'string' && config.dns.listen.trim() !== ''
 }
 
-export function shouldClearMihomoSystemDnsMode(
-  mode: AppConfig['macosSystemDnsMode'],
-  patch: Partial<MihomoConfig>
+export function shouldManageMihomoSystemDns(
+  controlDns: boolean,
+  config: Partial<MihomoConfig>
 ): boolean {
-  return mode === 'mihomo-listener' && isDisablingMihomoListenerPatch(patch)
+  return (
+    controlDns &&
+    config.dns?.enable === true &&
+    config.tun?.enable === true &&
+    hasMihomoDnsListener(config)
+  )
+}
+
+export function isDisablingMihomoListenerPatch(patch: Partial<MihomoConfig>): boolean {
+  const listen = patch.dns?.listen
+  return (
+    patch.tun?.enable === false ||
+    patch.dns?.enable === false ||
+    (typeof listen === 'string' && listen.trim() === '')
+  )
 }
 
 /** Parse and constrain the only target accepted by the privileged helper. */

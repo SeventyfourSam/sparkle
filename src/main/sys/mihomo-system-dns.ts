@@ -4,7 +4,7 @@ import {
   patchAppConfig,
   patchControledMihomoConfig
 } from '../config'
-import { generateProfile, getRuntimeConfig } from '../core/factory'
+import { getRuntimeConfig } from '../core/factory'
 import {
   acquireMihomoDnsLease,
   ensureMihomoDnsHelperDaemon,
@@ -14,10 +14,14 @@ import {
 } from './dns-helper'
 import {
   decideDnsLeaseReconcile,
+  hasMihomoDnsListener,
+  isDisablingMihomoListenerPatch,
   parseDnsLeaseTarget,
-  shouldClearMihomoSystemDnsMode
+  shouldManageMihomoSystemDns
 } from './dns-helper-protocol'
 import { appendAppLog } from '../utils/log'
+
+export { hasMihomoDnsListener, shouldManageMihomoSystemDns }
 
 export interface MihomoSystemDnsValidation {
   ok: boolean
@@ -48,73 +52,41 @@ function hasSystemDnsUpstream(dns: MihomoDNSConfig | undefined): boolean {
   return values.some(isSystemDnsUpstream)
 }
 
-export function validateMihomoSystemDnsMode(
+export function validateMihomoSystemDnsConfig(
   appConfig: AppConfig,
   controlledConfig: Partial<MihomoConfig>,
   runtimeConfig: Partial<MihomoConfig> | undefined
 ): MihomoSystemDnsValidation {
   if (process.platform !== 'darwin') return { ok: false, error: '仅 macOS 支持系统 DNS 模式' }
-  if (appConfig.macosSystemDnsMode !== 'mihomo-listener') return { ok: true }
+  if (!hasMihomoDnsListener(controlledConfig)) return { ok: true }
   if (appConfig.controlDns === false) return { ok: false, error: '必须启用受控 DNS' }
   if (controlledConfig.dns?.enable !== true || runtimeConfig?.dns?.enable !== true) {
-    return { ok: false, error: '必须启用 Mihomo DNS' }
+    return { ok: false, error: '配置 dns.listen 时必须启用 Mihomo DNS' }
   }
   if (controlledConfig.tun?.enable !== true || runtimeConfig?.tun?.enable !== true) {
-    return { ok: false, error: '必须启用 Tun' }
+    return { ok: false, error: '配置 dns.listen 时必须启用 Tun' }
   }
-  const dns = runtimeConfig?.dns
+  const dns = runtimeConfig.dns
   if (hasSystemDnsUpstream(dns)) {
     return { ok: false, error: 'DNS 上游使用 system 会与系统 DNS 形成递归，已拒绝' }
   }
-  const parsed = parseDnsLeaseTarget(dns?.listen)
+  const parsed = parseDnsLeaseTarget(dns.listen)
   if (!parsed.ok) return parsed
   return { ok: true, ...parsed.value }
 }
 
-/**
- * Preflight app-config mode changes before they become durable. Enabling the
- * mode validates the final generated profile and installs the fixed helper;
- * disabling it restores the resolver before clearing the mode marker.
- */
+/** Turning off controlled DNS must restore an active listener lease first. */
 export async function prepareMihomoSystemDnsAppPatch(
   patch: Partial<AppConfig>,
   currentConfig: AppConfig
 ): Promise<Partial<AppConfig>> {
-  if (
-    (patch.macosSystemDnsMode === 'none' || patch.controlDns === false) &&
-    currentConfig.macosSystemDnsMode === 'mihomo-listener'
-  ) {
+  if (patch.controlDns === false && currentConfig.controlDns !== false) {
     await releaseMihomoSystemDNSLease()
-    if (patch.controlDns === false && patch.macosSystemDnsMode === undefined) {
-      patch = { ...patch, macosSystemDnsMode: 'none' }
-    }
   }
-
-  if (
-    process.platform === 'darwin' &&
-    patch.macosSystemDnsMode === 'mihomo-listener' &&
-    currentConfig.macosSystemDnsMode !== 'mihomo-listener'
-  ) {
-    let runtimeConfig = await getRuntimeConfig()
-    if (!runtimeConfig) {
-      await generateProfile()
-      runtimeConfig = await getRuntimeConfig()
-    }
-    const validation = validateMihomoSystemDnsMode(
-      { ...currentConfig, macosSystemDnsMode: 'mihomo-listener' },
-      await getControledMihomoConfig(),
-      runtimeConfig
-    )
-    if (!validation.ok) {
-      throw new Error(validation.error || 'macOS Mihomo system DNS prerequisites are not met')
-    }
-    await ensureMihomoDnsHelperDaemon()
-  }
-
   return patch
 }
 
-/** Acquire the system resolver lease only after the final Mihomo runtime is ready. */
+/** Acquire automatically once the configured Mihomo listener is ready. */
 export async function acquireMihomoSystemDNSLease(): Promise<void> {
   if (process.platform !== 'darwin') return
   const [appConfig, controlledConfig, runtimeConfig] = await Promise.all([
@@ -122,79 +94,84 @@ export async function acquireMihomoSystemDNSLease(): Promise<void> {
     getControledMihomoConfig(),
     getRuntimeConfig()
   ])
-  const validation = validateMihomoSystemDnsMode(appConfig, controlledConfig, runtimeConfig)
-  if (appConfig.macosSystemDnsMode !== 'mihomo-listener') return
+  if (!shouldManageMihomoSystemDns(appConfig.controlDns !== false, controlledConfig)) return
+
+  const validation = validateMihomoSystemDnsConfig(appConfig, controlledConfig, runtimeConfig)
   if (!validation.ok || !validation.listen) {
     throw new Error(validation.error || 'macOS Mihomo system DNS prerequisites are not met')
   }
   await ensureMihomoDnsHelperDaemon()
   const status = await acquireMihomoDnsLease(validation.listen)
   if (!status.active || !status.healthy) {
-    throw new Error(status.error || 'macOS DNS helper 未能验证 Mihomo DNS 监听器')
+    throw new Error(status.error || 'macOS DNS helper 未检测到 Mihomo DNS 监听端口')
+  }
+
+  // dns.listen supersedes Sparkle's legacy public-DNS replacement. Clear an
+  // old persisted choice once so removing dns.listen cannot revive it later.
+  if (appConfig.autoSetDNSMode && appConfig.autoSetDNSMode !== 'none') {
+    await patchAppConfig({ autoSetDNSMode: 'none' })
   }
   await appendAppLog(`[DNS]: acquired macOS default resolver lease for ${validation.listen}\n`)
 }
 
-/** Release and verify the resolver before stopping the Mihomo listener. */
+/** Release and verify the resolver before stopping Tun or Mihomo. */
 export async function releaseMihomoSystemDNSLease(): Promise<void> {
   if (process.platform !== 'darwin') return
-  const appConfig = await getAppConfig()
-  // A configured listener mode is the durable marker that a crash may have
-  // left a root-owned lease behind. Ordinary release calls in disabled mode
-  // do not invoke the helper and never prompt for elevation.
-  if (appConfig.macosSystemDnsMode !== 'mihomo-listener') return
-  // Release is deliberately socket-only. If launchd is unavailable, fail
-  // closed and keep the Mihomo core alive rather than changing DNS blindly.
+  const status = await getMihomoDnsLeaseStatus()
+  if (!status.supported) {
+    const [appConfig, controlledConfig] = await Promise.all([
+      getAppConfig(),
+      getControledMihomoConfig()
+    ])
+    if (shouldManageMihomoSystemDns(appConfig.controlDns !== false, controlledConfig)) {
+      throw new Error(status.error || 'macOS DNS helper daemon 不可用，无法安全停止内核')
+    }
+    return
+  }
+  if (status.auth_failed) {
+    throw new Error(status.error || 'macOS DNS helper 请求认证失败')
+  }
+  if (!status.active && !status.lease_id && !status.error) return
+
   const released = await releaseMihomoDnsLease()
   if (!released.supported || released.active || released.conflict || released.error) {
     throw new Error(released.error || '系统 DNS 仍指向 Mihomo 监听器，无法安全停止内核')
   }
-  if (released.active === false) {
-    await appendAppLog('[DNS]: restored macOS default resolver\n')
-  }
+  await appendAppLog('[DNS]: restored macOS default resolver\n')
 }
 
 /** Route controlled DNS/Tun/listener disables through resolver release first. */
-export async function patchControlledConfigSafely(patch: Partial<MihomoConfig>): Promise<boolean> {
-  const currentConfig = await getAppConfig()
-  const modeChanged = shouldClearMihomoSystemDnsMode(currentConfig.macosSystemDnsMode, patch)
-  if (modeChanged) {
-    await releaseMihomoSystemDNSLease()
-    await patchAppConfig({ macosSystemDnsMode: 'none' })
-  }
+export async function patchControlledConfigSafely(patch: Partial<MihomoConfig>): Promise<void> {
+  if (isDisablingMihomoListenerPatch(patch)) await releaseMihomoSystemDNSLease()
   await patchControledMihomoConfig(patch)
-  return modeChanged
 }
 
-/**
- * Keep renderer runtime patches fail-closed while the durable listener mode
- * still owns the system resolver.  The controlled-config IPC path clears that
- * marker only after a verified release, so a swallowed renderer error cannot
- * immediately turn off Mihomo DNS underneath the active resolver lease.
- */
-export async function assertMihomoSystemDnsRuntimePatchSafe(
+/** Runtime-only shutdowns also release the system resolver before the listener. */
+export async function prepareMihomoSystemDnsRuntimePatch(
   patch: Partial<MihomoConfig>
 ): Promise<void> {
-  if (process.platform !== 'darwin') return
-  const appConfig = await getAppConfig(true)
-  if (shouldClearMihomoSystemDnsMode(appConfig.macosSystemDnsMode, patch)) {
-    throw new Error('系统 DNS 仍由 Mihomo 监听器接管，必须先安全恢复系统 DNS')
-  }
+  if (process.platform !== 'darwin' || !isDisablingMihomoListenerPatch(patch)) return
+  await releaseMihomoSystemDNSLease()
 }
 
-/** Reconcile an interrupted helper transaction without acquiring anything. */
+/** Reconcile an interrupted transaction without acquiring a new lease. */
 export async function reconcileMihomoSystemDNSLease(): Promise<void> {
   if (process.platform !== 'darwin') return
-  const appConfig = await getAppConfig()
-  const listenerMode = appConfig.macosSystemDnsMode === 'mihomo-listener'
-  if (!listenerMode) {
-    // Disabled mode never migrates or reacquires on a new primary service. A
-    // status query followed by direct release is the only cleanup path.
+  const [appConfig, controlledConfig] = await Promise.all([
+    getAppConfig(),
+    getControledMihomoConfig()
+  ])
+  const listenerExpected = shouldManageMihomoSystemDns(
+    appConfig.controlDns !== false,
+    controlledConfig
+  )
+
+  if (!listenerExpected) {
     const status = await getMihomoDnsLeaseStatus()
-    const decision = decideDnsLeaseReconcile('none', status)
+    const decision = decideDnsLeaseReconcile(false, status)
     if (decision === 'noop') return
     if (decision === 'error') {
-      throw new Error(status.error || 'macOS DNS helper 检测到外部 DNS 冲突')
+      throw new Error(status.error || 'macOS DNS helper 检测到无法安全恢复的 DNS 状态')
     }
     const released = await releaseMihomoDnsLease()
     if (!released.supported || released.active || released.conflict || released.error) {
@@ -203,10 +180,11 @@ export async function reconcileMihomoSystemDNSLease(): Promise<void> {
     return
   }
 
+  const parsed = parseDnsLeaseTarget(controlledConfig.dns?.listen)
+  if (!parsed.ok) throw new Error(parsed.error)
   await ensureMihomoDnsHelperDaemon()
   const status = await reconcileMihomoDnsLease()
-  const decision = decideDnsLeaseReconcile('mihomo-listener', status)
-  if (decision === 'noop') return
+  const decision = decideDnsLeaseReconcile(true, status)
   if (decision === 'error') {
     throw new Error(status.error || 'macOS DNS helper daemon 不可用，无法安全 reconcile 系统 DNS')
   }

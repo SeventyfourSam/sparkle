@@ -10,10 +10,12 @@ import React, { Key, useState } from 'react'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
 import { notify } from '@renderer/utils/notification'
 
+const showLegacyMacDnsControl = false
+
 const Tun: React.FC = () => {
   const { controledMihomoConfig, patchControledMihomoConfig } = useControledMihomoConfig()
   const { appConfig, patchAppConfig } = useAppConfig()
-  const { autoSetDNSMode = 'none', macosSystemDnsMode = 'none' } = appConfig || {}
+  const { autoSetDNSMode = 'none' } = appConfig || {}
   const { tun } = controledMihomoConfig || {}
   const [loading, setLoading] = useState(false)
   const {
@@ -109,42 +111,21 @@ const Tun: React.FC = () => {
               </Button>
             </SettingItem>
           )}
-          {platform === 'darwin' && (
-            <>
-              <SettingItem compatKey="legacy" title="自动设置公共 DNS（兼容模式）" divider>
-                <Tabs
-                  size="sm"
-                  color="primary"
-                  selectedKey={autoSetDNSMode}
-                  onSelectionChange={async (key: Key) => {
-                    await patchAppConfig({ autoSetDNSMode: key as 'none' | 'exec' | 'service' })
-                  }}
-                >
-                  <Tab key="none" title="不自动设置" />
-                  <Tab key="exec" title="执行命令" />
-                  <Tab key="service" title="服务模式" />
-                </Tabs>
-              </SettingItem>
-              <SettingItem compatKey="legacy" title="macOS 默认 DNS 指向 Mihomo" divider>
-                <Tabs
-                  size="sm"
-                  color="primary"
-                  selectedKey={macosSystemDnsMode}
-                  onSelectionChange={async (key: Key) => {
-                    const nextMode = key as 'none' | 'mihomo-listener'
-                    try {
-                      const updated = await patchAppConfig({ macosSystemDnsMode: nextMode })
-                      if (updated) await restartCore()
-                    } catch (error) {
-                      notify(error, { variant: 'danger' })
-                    }
-                  }}
-                >
-                  <Tab key="none" title="不自动设置" />
-                  <Tab key="mihomo-listener" title="使用 Mihomo 监听器" />
-                </Tabs>
-              </SettingItem>
-            </>
+          {showLegacyMacDnsControl && platform === 'darwin' && (
+            <SettingItem compatKey="legacy" title="自动设置系统 DNS" divider>
+              <Tabs
+                size="sm"
+                color="primary"
+                selectedKey={autoSetDNSMode}
+                onSelectionChange={async (key: Key) => {
+                  await patchAppConfig({ autoSetDNSMode: key as 'none' | 'exec' | 'service' })
+                }}
+              >
+                <Tab key="none" title="不自动设置" />
+                <Tab key="exec" title="执行命令" />
+                <Tab key="service" title="服务模式" />
+              </Tabs>
+            </SettingItem>
           )}
           <SettingItem compatKey="legacy" title="Tun 模式堆栈" divider>
             <Tabs

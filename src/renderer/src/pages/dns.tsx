@@ -7,6 +7,7 @@ import AdvancedDnsSetting from '@renderer/components/dns/advanced-dns-setting'
 import { useControledMihomoConfig } from '@renderer/hooks/use-controled-mihomo-config'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
 import { restartCore } from '@renderer/utils/ipc'
+import { platform } from '@renderer/utils/init'
 import React, { Key, useState } from 'react'
 import { notify } from '@renderer/utils/notification'
 import {
@@ -178,7 +179,11 @@ const DNS: React.FC = () => {
             }}
           />
         </SettingItem>
-        <SettingItem compatKey="legacy" title="DNS 监听地址" divider>
+        <SettingItem
+          compatKey="legacy"
+          title={platform === 'darwin' ? 'DNS 监听地址（自动接管系统 DNS）' : 'DNS 监听地址'}
+          divider
+        >
           <Tooltip
             content={listenError}
             placement="right"

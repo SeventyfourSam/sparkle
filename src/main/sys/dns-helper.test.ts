@@ -7,12 +7,14 @@ import {
   buildDnsHelperInstallArgs,
   decideDnsLeaseReconcile,
   dnsHelperProtocolVersion,
+  hasMihomoDnsListener,
+  isDisablingMihomoListenerPatch,
   isOwnedDnsTarget,
   needsDnsHelperInstall,
   nextAcquireAction,
   parseDnsLeaseTarget,
   restoreOwnedDnsFields,
-  shouldClearMihomoSystemDnsMode,
+  shouldManageMihomoSystemDns,
   type DnsLeaseState
 } from './dns-helper-protocol'
 import { ensureDnsHelperAuthFile } from './dns-helper-auth'
@@ -169,7 +171,7 @@ test('helper update decision separates wire compatibility from build identity', 
 
 test('disabled reconcile is a no-op without a daemon and releases a stale lease', () => {
   assert.equal(
-    decideDnsLeaseReconcile('none', {
+    decideDnsLeaseReconcile(false, {
       supported: false,
       active: false,
       conflict: false,
@@ -179,7 +181,7 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
     'noop'
   )
   assert.equal(
-    decideDnsLeaseReconcile('none', {
+    decideDnsLeaseReconcile(false, {
       supported: true,
       active: false,
       conflict: false,
@@ -189,7 +191,7 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
     'noop'
   )
   assert.equal(
-    decideDnsLeaseReconcile('none', {
+    decideDnsLeaseReconcile(false, {
       supported: true,
       active: true,
       conflict: false,
@@ -199,7 +201,18 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
     'release'
   )
   assert.equal(
-    decideDnsLeaseReconcile('mihomo-listener', {
+    decideDnsLeaseReconcile(false, {
+      supported: true,
+      active: false,
+      lease_id: 'pending-lease',
+      conflict: true,
+      auth_failed: false,
+      error: 'DNS fields were replaced'
+    }),
+    'release'
+  )
+  assert.equal(
+    decideDnsLeaseReconcile(true, {
       supported: false,
       active: false,
       conflict: false,
@@ -209,7 +222,7 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
     'error'
   )
   assert.equal(
-    decideDnsLeaseReconcile('mihomo-listener', {
+    decideDnsLeaseReconcile(true, {
       supported: true,
       active: false,
       conflict: false,
@@ -219,7 +232,7 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
     'error'
   )
   assert.equal(
-    decideDnsLeaseReconcile('mihomo-listener', {
+    decideDnsLeaseReconcile(true, {
       supported: true,
       active: false,
       conflict: false,
@@ -229,7 +242,7 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
     'error'
   )
   assert.equal(
-    decideDnsLeaseReconcile('none', {
+    decideDnsLeaseReconcile(false, {
       supported: true,
       active: true,
       conflict: false,
@@ -240,15 +253,23 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
   )
 })
 
-test('listener-disabling patches stay lifecycle-routed while listener mode is durable', () => {
-  assert.equal(shouldClearMihomoSystemDnsMode('mihomo-listener', { tun: { enable: false } }), true)
-  assert.equal(shouldClearMihomoSystemDnsMode('mihomo-listener', { dns: { enable: false } }), true)
-  assert.equal(shouldClearMihomoSystemDnsMode('mihomo-listener', { dns: { listen: '' } }), true)
-  assert.equal(shouldClearMihomoSystemDnsMode('none', { tun: { enable: false } }), false)
+test('dns.listen automatically controls the macOS resolver lifecycle', () => {
+  const enabled = {
+    tun: { enable: true },
+    dns: { enable: true, listen: '127.0.0.1:1053' }
+  }
+  assert.equal(hasMihomoDnsListener(enabled), true)
+  assert.equal(shouldManageMihomoSystemDns(true, enabled), true)
+  assert.equal(shouldManageMihomoSystemDns(false, enabled), false)
+  assert.equal(shouldManageMihomoSystemDns(true, { ...enabled, tun: { enable: false } }), false)
   assert.equal(
-    shouldClearMihomoSystemDnsMode('mihomo-listener', {
-      dns: { nameserver: ['1.1.1.1'] }
-    }),
+    shouldManageMihomoSystemDns(true, { ...enabled, dns: { enable: false, listen: '' } }),
     false
   )
+
+  assert.equal(isDisablingMihomoListenerPatch({ tun: { enable: false } }), true)
+  assert.equal(isDisablingMihomoListenerPatch({ dns: { enable: false } }), true)
+  assert.equal(isDisablingMihomoListenerPatch({ dns: { listen: '' } }), true)
+  assert.equal(isDisablingMihomoListenerPatch({ dns: { listen: '  ' } }), true)
+  assert.equal(isDisablingMihomoListenerPatch({ dns: { nameserver: ['1.1.1.1'] } }), false)
 })

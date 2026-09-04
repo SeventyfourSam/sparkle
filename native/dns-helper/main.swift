@@ -453,12 +453,13 @@ private func restoreStateLocked(
     // intact, preserve that explicit change instead of re-enabling it.
     let restoreEnabled = before.enabled ? state.protocolEnabled : false
     if !fieldsOwned {
-        // A commit can fail before changing anything. Treat an already
-        // restored dictionary as an idempotent rollback, but still undo a
-        // helper-owned protocol-enable transition when the fields happen to
-        // match the original snapshot already.
-        guard fieldsRestored else {
-            throw HelperError.conflict("DNS 目标字段已被外部配置替换，未覆盖外部更改")
+        // Once the lease is released, an external replacement owns the DNS
+        // fields. Preserve it and forget our snapshot instead of overwriting
+        // a newer user, DHCP, VPN, or MDM choice.
+        if !fieldsRestored {
+            if stopWatch { stopWatcher(state) }
+            try removeState()
+            return
         }
         if before.enabled != restoreEnabled {
             try setConfigurationLocked(context, service: service, configuration: before.configuration, enabled: restoreEnabled)
@@ -639,25 +640,15 @@ private func runNativeSelfTest() throws -> Status {
     return status(healthy: true)
 }
 
-private func dnsQuery(_ target: Target, tcp: Bool) -> Bool {
+private func listenerAvailable(_ target: Target) -> Bool {
     guard let port = NWEndpoint.Port(rawValue: UInt16(target.port)) else { return false }
     let connection = NWConnection(
         host: NWEndpoint.Host(target.address),
         port: port,
-        using: tcp ? .tcp : .udp
+        using: .tcp
     )
-    var query = Data()
-    appendDNSUInt16(stableDNSQueryID, to: &query)
-    query.append(contentsOf: [0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-    query.append(stableDNSQuestion)
-    let payload: Data
-    if tcp {
-        payload = Data([UInt8(query.count >> 8), UInt8(query.count & 0xff)]) + query
-    } else {
-        payload = query
-    }
     let semaphore = DispatchSemaphore(value: 0)
-    let callbackQueue = DispatchQueue(label: "com.sparkle.dns-helper.dns-query")
+    let callbackQueue = DispatchQueue(label: "com.sparkle.dns-helper.listener-probe")
     let resultLock = NSLock()
     var result = false
     var finished = false
@@ -676,29 +667,7 @@ private func dnsQuery(_ target: Target, tcp: Bool) -> Bool {
     connection.stateUpdateHandler = { state in
         switch state {
         case .ready:
-            connection.send(content: payload, completion: .contentProcessed { error in
-                guard error == nil else { finish(false); return }
-                if tcp {
-                    connection.receive(minimumIncompleteLength: 2, maximumLength: 2) { length, _, _, error in
-                        guard error == nil, let length, length.count == 2 else { finish(false); return }
-                        let size = Int(length[0]) << 8 | Int(length[1])
-                        guard size > 3, size <= 65535 else { finish(false); return }
-                        connection.receive(minimumIncompleteLength: size, maximumLength: size) { data, _, _, error in
-                            let validation = error == nil
-                                ? validateDNSResponse(data, expectedID: stableDNSQueryID, transport: .tcp)
-                                : nil
-                            finish(validation == .valid)
-                        }
-                    }
-                } else {
-                    connection.receive(minimumIncompleteLength: 4, maximumLength: 4096) { data, _, _, error in
-                        let validation = error == nil
-                            ? validateDNSResponse(data, expectedID: stableDNSQueryID, transport: .udp)
-                            : nil
-                        finish(validation == .valid || validation == .truncated)
-                    }
-                }
-            })
+            finish(true)
         case .failed, .cancelled:
             finish(false)
         default:
@@ -718,27 +687,23 @@ private func dnsQuery(_ target: Target, tcp: Bool) -> Bool {
     return finalResult
 }
 
-private func healthy(_ target: Target) -> Bool {
-    dnsQuery(target, tcp: false) && dnsQuery(target, tcp: true)
-}
-
 private func startWatchdog(_ state: inout LeaseState) {
-    // Health and network-change monitoring belongs to the single launchd
+    // Listener and network-change monitoring belongs to the single launchd
     // daemon.  Never fork one watchdog per acquire/reconcile operation.
     state.watcherPID = nil
 }
 
 private func acquire(_ target: Target) throws -> Status {
     let existing = try readState()
-    guard healthy(target) else {
+    guard listenerAvailable(target) else {
         if let existing {
             do {
                 try restoreState(existing)
             } catch {
-                throw HelperError.transaction("新 DNS 目标不健康且旧租约恢复失败：\(error.localizedDescription)")
+                throw HelperError.transaction("新 DNS 端口未监听且旧租约恢复失败：\(error.localizedDescription)")
             }
         }
-        throw HelperError.unavailable("Mihomo DNS 监听器未通过 UDP 和 TCP DNS 探活")
+        throw HelperError.unavailable("Mihomo DNS TCP 端口未监听")
     }
     if let existing {
         if existing.phase == "active", existing.target == target {
@@ -748,8 +713,8 @@ private func acquire(_ target: Target) throws -> Status {
                     throw HelperError.conflict("DNS 网络服务已变化，请先恢复旧租约")
                 }
                 let current = try snapshot(context, service: service)
-                guard owned(current, target: target) else {
-                    throw HelperError.conflict("DNS 目标字段已被外部配置替换")
+                if !owned(current, target: target) {
+                    return try applyNewLeaseLocked(existing, context: context)
                 }
                 var refreshed = existing
                 stopWatcher(existing)
@@ -796,12 +761,10 @@ private func applyNewLeaseLocked(
         }
         let after = try snapshot(context, service: verifiedService)
         guard owned(after, target: state.target) else { throw HelperError.transaction("DNS 应用验证失败") }
-        // A successful SCPreferences commit is not sufficient: the final
-        // runtime listener must answer real UDP and TCP DNS exchanges after
-        // the resolver target is changed. Roll back while still holding the
-        // same preferences lock if this post-apply check fails.
-        guard healthy(state.target) else {
-            throw HelperError.unavailable("DNS 应用后 Mihomo 监听器未通过 UDP 和 TCP DNS 探活")
+        // DNS correctness belongs to Mihomo. The lease only requires the
+        // configured endpoint to remain a live listener.
+        guard listenerAvailable(state.target) else {
+            throw HelperError.unavailable("DNS 应用后 Mihomo TCP 端口未监听")
         }
         var active = state
         active.phase = "active"
@@ -831,7 +794,7 @@ private func release() throws -> Status {
 
 private func currentStatus() throws -> Status {
     guard let state = try readState() else { return status() }
-    let isHealthy = healthy(state.target)
+    let isHealthy = listenerAvailable(state.target)
     let context = try NetworkContext()
     return try withPreferencesLock(context) {
         guard let service = context.service(withID: state.serviceID) else {
@@ -850,7 +813,7 @@ private func reconcile() throws -> Status {
     if state.phase == "pending" {
         return try release()
     }
-    guard healthy(state.target) else {
+    guard listenerAvailable(state.target) else {
         return try release()
     }
     let context = try NetworkContext()
@@ -864,7 +827,8 @@ private func reconcile() throws -> Status {
             return true
         }
         let current = try snapshot(context, service: primary)
-        guard owned(current, target: state.target) else {
+        if !owned(current, target: state.target) {
+            _ = try applyNewLeaseLocked(state, context: context)
             return false
         }
         var refreshed = state

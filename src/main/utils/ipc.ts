@@ -63,9 +63,9 @@ import {
 import { quitWithoutCore, restartCore, startNetworkDetection, stopCore } from '../core/manager'
 import { stopNetworkDetection } from '../core/network'
 import {
-  assertMihomoSystemDnsRuntimePatchSafe,
   patchControlledConfigSafely,
-  prepareMihomoSystemDnsAppPatch
+  prepareMihomoSystemDnsAppPatch,
+  prepareMihomoSystemDnsRuntimePatch
 } from '../sys/mihomo-system-dns'
 import {
   checkCorePermission,
@@ -136,12 +136,7 @@ import v8 from 'v8'
 import { getGistUrl } from '../resolve/gistApi'
 import { getIconDataURL, getImageDataURL } from './icon'
 import { startMonitor } from '../resolve/trafficMonitor'
-import {
-  closeFloatingWindow,
-  floatingWindow,
-  showContextMenu,
-  showFloatingWindow
-} from '../resolve/floatingWindow'
+import { closeFloatingWindow, showContextMenu, showFloatingWindow } from '../resolve/floatingWindow'
 import { getAppName } from '@uruhalushia/sparkle-native'
 import { showNotification } from './notification'
 import { getUserAgent } from './userAgent'
@@ -222,17 +217,8 @@ async function normalizeServiceModePatch(patch: Partial<AppConfig>): Promise<Par
   }
 }
 
-async function patchControlledConfigFromRenderer(patch: Partial<MihomoConfig>): Promise<boolean> {
-  const modeChanged = await patchControlledConfigSafely(patch)
-  if (modeChanged) {
-    mainWindow?.webContents.send('appConfigUpdated')
-    floatingWindow?.webContents.send('appConfigUpdated')
-  }
-  return modeChanged
-}
-
 async function patchMihomoConfigFromRenderer(patch: Partial<MihomoConfig>): Promise<void> {
-  await assertMihomoSystemDnsRuntimePatchSafe(patch)
+  await prepareMihomoSystemDnsRuntimePatch(patch)
   return await patchMihomoConfig(patch as Partial<ControllerConfigs>)
 }
 
@@ -285,7 +271,7 @@ export function registerIpcMainHandlers(): void {
     ipcErrorWrapper(getControledMihomoConfig)(force)
   )
   ipcMain.handle('patchControledMihomoConfig', (_e, config) =>
-    ipcErrorWrapper(patchControlledConfigFromRenderer)(config)
+    ipcErrorWrapper(patchControlledConfigSafely)(config)
   )
   ipcMain.handle('getProfileConfig', (_e, force) => ipcErrorWrapper(getProfileConfig)(force))
   ipcMain.handle('setProfileConfig', (_e, config) => ipcErrorWrapper(setProfileConfig)(config))
