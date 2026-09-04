@@ -9,7 +9,7 @@ import {
 import { triggerSysProxy } from '../sys/sysproxy'
 import { patchMihomoConfig } from '../core/mihomoApi'
 import { quitWithoutCore, restartCore } from '../core/manager'
-import { patchControlledConfigSafely } from '../core/network'
+import { patchControlledConfigSafely } from '../sys/mihomo-system-dns'
 import { floatingWindow, triggerFloatingWindow } from './floatingWindow'
 import { showNotification } from '../utils/notification'
 

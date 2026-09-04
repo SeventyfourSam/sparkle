@@ -123,11 +123,6 @@ export function servicePath(): string {
   return path.join(resourcesFilesDir(), `sparkle-service${isWin ? '.exe' : ''}`)
 }
 
-/** Path to Sparkle's narrowly-scoped macOS DNS helper. */
-export function dnsHelperPath(): string {
-  return path.join(resourcesFilesDir(), 'sparkle-dns-helper')
-}
-
 export function serviceAuthStorePath(): string {
   return path.join(dataDir(), 'service-auth.json')
 }

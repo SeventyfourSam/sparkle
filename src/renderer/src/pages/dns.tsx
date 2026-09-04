@@ -14,8 +14,7 @@ import {
   isValidIPv6Cidr,
   isValidDomainWildcard,
   isValidDnsServer,
-  isValidListenAddress,
-  isWildcardListenAddress
+  isValidListenAddress
 } from '@renderer/utils/validate'
 
 const DNS: React.FC = () => {
@@ -181,11 +180,11 @@ const DNS: React.FC = () => {
         </SettingItem>
         <SettingItem compatKey="legacy" title="DNS 监听地址" divider>
           <Tooltip
-            content={listenError || '通配地址会向局域网暴露 DNS 监听器，请确认这是有意配置'}
+            content={listenError}
             placement="right"
-            isOpen={Boolean(listenError || isWildcardListenAddress(values.listen))}
+            isOpen={Boolean(listenError)}
             showArrow={true}
-            color={listenError ? 'danger' : 'warning'}
+            color="danger"
             offset={15}
           >
             <Input

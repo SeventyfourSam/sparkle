@@ -32,14 +32,11 @@ test('accepts only loopback non-53 DNS lease targets', () => {
   assert.equal(parseDnsLeaseTarget('::1:1053').ok, false)
 })
 
-test('renderer listen parsing accepts ordinary IPv4 host:port values', async () => {
-  const { isValidListenAddress, parseListenAddress } =
-    await import('../../renderer/src/utils/validate')
+test('renderer listen validation accepts ordinary host:port values', async () => {
+  const { isValidListenAddress } = await import('../../renderer/src/utils/validate')
   assert.equal(isValidListenAddress('127.0.0.1:1053').ok, true)
-  assert.deepEqual(parseListenAddress('example.test:1053'), {
-    ok: true,
-    value: { host: 'example.test', port: 1053, wildcard: false }
-  })
+  assert.equal(isValidListenAddress('example.test:1053').ok, true)
+  assert.equal(isValidListenAddress('example.test').ok, false)
 })
 
 test('lease transitions are idempotent and do not reuse another target', () => {

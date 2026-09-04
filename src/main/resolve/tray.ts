@@ -31,7 +31,7 @@ import {
 import { dataDir, logDir, mihomoCoreDir, mihomoWorkDir } from '../utils/dirs'
 import { triggerSysProxy } from '../sys/sysproxy'
 import { quitWithoutCore, restartCore } from '../core/manager'
-import { patchControlledConfigSafely } from '../core/network'
+import { patchControlledConfigSafely } from '../sys/mihomo-system-dns'
 import { floatingWindow, triggerFloatingWindow } from './floatingWindow'
 import { is } from '@electron-toolkit/utils'
 import { extname, join } from 'path'

@@ -38,15 +38,13 @@ import {
 } from '../utils/notification'
 import { createCoreHookWaiter, createCoreStartupHook } from './startupHook'
 import { stopChildProcess } from './process-control'
+import { recoverDNS, setPublicDNS, startNetworkDetectionController } from './network'
 import {
   acquireMihomoSystemDNSLease,
   patchControlledConfigSafely,
-  recoverDNS,
   reconcileMihomoSystemDNSLease,
-  releaseMihomoSystemDNSLease,
-  setPublicDNS,
-  startNetworkDetectionController
-} from './network'
+  releaseMihomoSystemDNSLease
+} from '../sys/mihomo-system-dns'
 import { checkProfile } from './profile-check'
 import {
   createCoreEnvironment,
@@ -644,12 +642,6 @@ export async function stopCore(force = false): Promise<void> {
     }
   } catch (error) {
     await appendAppLog(`[Manager]: recover dns failed, ${error}\n`)
-    void showNotification({
-      title: 'DNS 恢复失败，内核保持运行',
-      body: `${error}`,
-      variant: 'danger'
-    })
-    throw error
   }
 
   serviceCoreRuntime.clearStreams()

@@ -3,8 +3,8 @@ import { accessSync, constants, existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createConnection } from 'node:net'
-import { dnsHelperPath, dataDir } from '../utils/dirs'
-import { execWithElevationOutput } from '../utils/elevation'
+import { dataDir } from '../utils/dirs'
+import { dnsHelperPath, execWithElevationOutput } from './dns-helper-execution'
 import {
   buildDnsHelperInstallArgs,
   type DnsHelperAuthMaterial,

@@ -301,22 +301,6 @@ export async function serviceStatus(): Promise<
   return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('serviceStatus'))
 }
 
-export async function mihomoDnsHelperAvailable(): Promise<boolean> {
-  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('mihomoDnsHelperAvailable'))
-}
-
-export async function mihomoDnsHelperStatus(): Promise<{
-  supported: boolean
-  active: boolean
-  healthy: boolean
-  lease_id?: string
-  listen?: string
-  conflict?: boolean
-  error?: string
-}> {
-  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('mihomoDnsHelperStatus'))
-}
-
 export async function testServiceConnection(): Promise<boolean> {
   return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('testServiceConnection'))
 }
