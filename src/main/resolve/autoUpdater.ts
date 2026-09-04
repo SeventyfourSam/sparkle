@@ -20,6 +20,7 @@ import {
 import { appendAppLog } from '../utils/log'
 
 let downloadCancelToken: CancelTokenSource | null = null
+const CUSTOM_VERSION_SUFFIX = /-custom(?:\.[0-9A-Za-z-]+)*$/i
 const WINDOWS_INSTALLER_MIN_TEMP_SPACE_BYTES = 1024 * 1024 * 1024
 const UPDATE_MANIFEST_URLS: Record<AppUpdateChannel, string> = {
   stable: 'https://github.com/xishang0128/sparkle/releases/latest/download/latest.yml',
@@ -66,8 +67,8 @@ export async function checkUpdate(): Promise<AppVersion | undefined> {
     responseType: 'text'
   })
   const latest = parseYaml<AppVersion>(res.data)
-  const currentVersion = app.getVersion()
-  if (latest.version !== currentVersion) {
+  const currentVersion = app.getVersion().replace(CUSTOM_VERSION_SUFFIX, '')
+  if (latest.version.replace(CUSTOM_VERSION_SUFFIX, '') !== currentVersion) {
     return latest
   } else {
     return undefined
@@ -98,6 +99,8 @@ async function ensureWindowsInstallerTempSpace(): Promise<void> {
 }
 
 export async function downloadAndInstallUpdate(version: string, tag?: string): Promise<void> {
+  if (CUSTOM_VERSION_SUFFIX.test(app.getVersion())) return
+
   let appUpdateInstalling = false
   let sysProxyPaused = false
   const pauseSysProxy = async (): Promise<void> => {

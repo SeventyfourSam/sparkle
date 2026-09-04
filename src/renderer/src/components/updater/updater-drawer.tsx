@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { downloadAndInstallUpdate } from '@renderer/utils/ipc'
 import { FiX, FiDownload } from 'react-icons/fi'
 import { notify } from '@renderer/utils/notification'
+import { version as currentVersion } from '@renderer/utils/init'
 
 interface Props {
   version: string
@@ -79,6 +80,7 @@ const UpdaterDrawer: React.FC<Props> = (props) => {
   }
 
   const isDownloading = updateStatus?.downloading || downloading
+  const isCustomBuild = currentVersion.includes('-custom.')
   const releaseTag = tag ?? (version.includes('-rolling-') ? 'rolling' : version)
   const releaseUrl = `https://github.com/xishang0128/sparkle/releases/tag/${releaseTag}`
 
@@ -105,7 +107,7 @@ const UpdaterDrawer: React.FC<Props> = (props) => {
                 </Drawer.Heading>
               </div>
             </div>
-            {!isDownloading && (
+            {!isDownloading && !isCustomBuild && (
               <Link
                 className="app-nodrag shrink-0 text-sm"
                 href={releaseUrl}
@@ -178,7 +180,7 @@ const UpdaterDrawer: React.FC<Props> = (props) => {
                 '取消'
               )}
             </Button>
-            {!updateStatus?.downloading && (
+            {!updateStatus?.downloading && !isCustomBuild && (
               <Button
                 size="sm"
                 className="h-8 min-w-0 px-3 text-sm leading-none"
