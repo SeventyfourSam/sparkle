@@ -63,6 +63,7 @@ import {
 import { quitWithoutCore, restartCore, startNetworkDetection, stopCore } from '../core/manager'
 import { stopNetworkDetection } from '../core/network'
 import {
+  assertMihomoSystemDnsRuntimePatchSafe,
   patchControlledConfigSafely,
   prepareMihomoSystemDnsAppPatch
 } from '../sys/mihomo-system-dns'
@@ -230,6 +231,11 @@ async function patchControlledConfigFromRenderer(patch: Partial<MihomoConfig>): 
   return modeChanged
 }
 
+async function patchMihomoConfigFromRenderer(patch: Partial<MihomoConfig>): Promise<void> {
+  await assertMihomoSystemDnsRuntimePatchSafe(patch)
+  return await patchMihomoConfig(patch as Partial<ControllerConfigs>)
+}
+
 export function registerIpcMainHandlers(): void {
   ipcMain.handle('mihomoVersion', ipcErrorWrapper(mihomoVersion))
   ipcMain.handle('mihomoConfig', ipcErrorWrapper(mihomoConfig))
@@ -262,7 +268,9 @@ export function registerIpcMainHandlers(): void {
     ipcErrorWrapper(mihomoGroupDelay)(group, url)
   )
   ipcMain.handle('mihomoRulesDisable', (_e, rules) => ipcErrorWrapper(mihomoRulesDisable)(rules))
-  ipcMain.handle('patchMihomoConfig', (_e, patch) => ipcErrorWrapper(patchMihomoConfig)(patch))
+  ipcMain.handle('patchMihomoConfig', (_e, patch) =>
+    ipcErrorWrapper(patchMihomoConfigFromRenderer)(patch)
+  )
   ipcMain.handle('restartMihomoLogs', ipcErrorWrapper(restartMihomoLogs))
   ipcMain.handle('checkAutoRun', ipcErrorWrapper(checkAutoRun))
   ipcMain.handle('enableAutoRun', ipcErrorWrapper(enableAutoRun))

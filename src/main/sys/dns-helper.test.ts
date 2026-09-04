@@ -240,9 +240,15 @@ test('disabled reconcile is a no-op without a daemon and releases a stale lease'
   )
 })
 
-test('controlled config disabling patches are lifecycle-routed', async () => {
+test('listener-disabling patches stay lifecycle-routed while listener mode is durable', () => {
   assert.equal(shouldClearMihomoSystemDnsMode('mihomo-listener', { tun: { enable: false } }), true)
   assert.equal(shouldClearMihomoSystemDnsMode('mihomo-listener', { dns: { enable: false } }), true)
   assert.equal(shouldClearMihomoSystemDnsMode('mihomo-listener', { dns: { listen: '' } }), true)
   assert.equal(shouldClearMihomoSystemDnsMode('none', { tun: { enable: false } }), false)
+  assert.equal(
+    shouldClearMihomoSystemDnsMode('mihomo-listener', {
+      dns: { nameserver: ['1.1.1.1'] }
+    }),
+    false
+  )
 })

@@ -166,6 +166,22 @@ export async function patchControlledConfigSafely(patch: Partial<MihomoConfig>):
   return modeChanged
 }
 
+/**
+ * Keep renderer runtime patches fail-closed while the durable listener mode
+ * still owns the system resolver.  The controlled-config IPC path clears that
+ * marker only after a verified release, so a swallowed renderer error cannot
+ * immediately turn off Mihomo DNS underneath the active resolver lease.
+ */
+export async function assertMihomoSystemDnsRuntimePatchSafe(
+  patch: Partial<MihomoConfig>
+): Promise<void> {
+  if (process.platform !== 'darwin') return
+  const appConfig = await getAppConfig(true)
+  if (shouldClearMihomoSystemDnsMode(appConfig.macosSystemDnsMode, patch)) {
+    throw new Error('系统 DNS 仍由 Mihomo 监听器接管，必须先安全恢复系统 DNS')
+  }
+}
+
 /** Reconcile an interrupted helper transaction without acquiring anything. */
 export async function reconcileMihomoSystemDNSLease(): Promise<void> {
   if (process.platform !== 'darwin') return
