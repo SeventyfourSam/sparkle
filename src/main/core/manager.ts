@@ -1,14 +1,16 @@
 import { ChildProcess, spawn } from 'child_process'
-import { dataDir, coreLogPath, mihomoCorePath } from '../utils/dirs'
+import { dataDir, coreLogPath, localCoreDir, mihomoCorePath } from '../utils/dirs'
+import { ensureLocalCorePermission, importLocalCore } from './local-core'
 import { generateProfile, getRuntimeConfig } from './factory'
 import { getAppConfig, getControledMihomoConfig, getProfileConfig, patchAppConfig } from '../config'
-import { app, ipcMain } from 'electron'
+import { app } from 'electron'
 import {
   startMihomoTraffic,
   startMihomoConnections,
   startMihomoLogs,
   startMihomoMemory,
   patchMihomoConfig,
+  mihomoConfig,
   mihomoGroups,
   getAxios
 } from './mihomoApi'
@@ -42,7 +44,6 @@ import { recoverDNS, setPublicDNS, startNetworkDetectionController } from './net
 import {
   acquireMihomoSystemDNSLease,
   hasMihomoDnsListener,
-  patchControlledConfigSafely,
   reconcileMihomoSystemDNSLease,
   releaseMihomoSystemDNSLease,
   shouldManageMihomoSystemDns
@@ -54,7 +55,6 @@ import {
   createProviderInitializationTracker,
   isControllerListenError,
   isControllerReadyLog,
-  isTunPermissionError,
   isUpdaterFinishedLog
 } from './startup-chain'
 import { createServiceCoreRuntime } from './service-core-runtime'
@@ -213,6 +213,19 @@ async function startMihomoApiStreams(): Promise<void> {
   directCoreState.retry = 10
 }
 
+async function ensureTunStarted(): Promise<void> {
+  if (!(await getRuntimeConfig()).tun?.enable) return
+  try {
+    if (!(await mihomoConfig()).tun?.enable) {
+      throw new Error('虚拟网卡启动失败，请检查内核权限和 TUN 日志；未修改系统 DNS')
+    }
+  } catch (error) {
+    // Restore DNS before stopping the failed core; preserve the user's TUN setting.
+    await stopCore()
+    throw error
+  }
+}
+
 async function completeCoreInitialization(logLevel?: LogLevel): Promise<void> {
   const tasks: Promise<unknown>[] = [
     delay(100).then(() => {
@@ -369,6 +382,15 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     throw error
   }
 
+  if (core === 'system') {
+    const importedPath = await importLocalCore(corePath, localCoreDir())
+    if (!useServiceCore) await ensureLocalCorePermission(importedPath)
+    if (importedPath !== corePath) {
+      await patchAppConfig({ systemCorePath: importedPath })
+      corePath = importedPath
+    }
+  }
+
   await generateProfile()
   await checkProfile()
   let serviceCoreRunning = false
@@ -467,6 +489,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
       serviceCoreRuntime.endStartup()
     }
     await serviceCoreRuntime.ensureStreamsStarted()
+    await ensureTunStarted()
     initialized = true
     return [completeCoreInitialization(logLevel)]
   }
@@ -547,22 +570,14 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
           controllerReady = true
           resolve([
             new Promise((resolve, reject) => {
+              let initializationStarted = false
               const handleProviderInitialization = async (logLine: string): Promise<void> => {
                 providerTracker.track(logLine)
 
-                if (isTunPermissionError(logLine)) {
-                  try {
-                    await patchControlledConfigSafely({ tun: { enable: false } })
-                  } catch (error) {
-                    await appendAppLog(`[Manager]: failed to safely disable Tun, ${error}\n`)
-                  }
-                  mainWindow?.webContents.send('controledMihomoConfigUpdated')
-                  ipcMain.emit('updateTrayMenu')
-                  reject('虚拟网卡启动失败，前往内核设置页尝试手动授予内核权限')
-                }
-
-                if (providerTracker.isReady(logLine)) {
+                if (!initializationStarted && providerTracker.isReady(logLine)) {
+                  initializationStarted = true
                   await waitForMihomoReady()
+                  await ensureTunStarted()
                   initialized = true
                   completeCoreInitialization(logLevel)
                     .then(() => resolve())
@@ -575,6 +590,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
                   handleProviderInitialization(data.toString()).catch(reject)
                 }
               })
+              handleProviderInitialization(str).catch(reject)
 
               child.once('close', (code, signal) => {
                 if (!initialized) {
@@ -599,6 +615,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
 
       hookWaiter.promise
         .then(async () => {
+          await ensureTunStarted()
           initialized = true
           await startMihomoApiStreams()
           resolve([completeCoreInitialization(logLevel)])
@@ -607,7 +624,11 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     })
   }
 
-  return coreStartupMode === 'post-up' ? waitForCoreReadyByHook() : waitForCoreReadyByLog()
+  const promises = await (coreStartupMode === 'post-up'
+    ? waitForCoreReadyByHook()
+    : waitForCoreReadyByLog())
+  await Promise.all(promises)
+  return promises
 }
 
 export async function stopCore(force = false): Promise<void> {

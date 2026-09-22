@@ -97,7 +97,8 @@ import {
   restartService
 } from '../service/manager'
 import { patchCoreProfile } from '../service/api'
-import { coreLogPath, findSystemMihomo, logDir } from './dirs'
+import { coreLogPath, findSystemMihomo, localCoreDir, logDir } from './dirs'
+import { ensureLocalCorePermission, importLocalCore } from '../core/local-core'
 import {
   getRuntimeConfig,
   getRuntimeConfigStr,
@@ -168,6 +169,22 @@ function ipcErrorWrapper<T>( // eslint-disable-next-line @typescript-eslint/no-e
 
 async function patchAppConfigWithServiceSync(patch: Partial<AppConfig>): Promise<AppConfig> {
   const currentConfig = await getAppConfig()
+  const nextCore = patch.core ?? currentConfig.core
+  if (patch.systemCorePath || (nextCore === 'system' && (patch.core || patch.corePermissionMode))) {
+    patch = {
+      ...patch,
+      systemCorePath: await importLocalCore(
+        patch.systemCorePath || currentConfig.systemCorePath || '',
+        localCoreDir()
+      )
+    }
+    if (
+      nextCore === 'system' &&
+      (patch.corePermissionMode ?? currentConfig.corePermissionMode) !== 'service'
+    ) {
+      await ensureLocalCorePermission(patch.systemCorePath!)
+    }
+  }
   patch = await prepareMihomoSystemDnsAppPatch(patch, currentConfig)
   const nextConfig = await patchAppConfig(await normalizeServiceModePatch(patch))
 

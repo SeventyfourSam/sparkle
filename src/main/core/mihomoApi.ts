@@ -307,6 +307,8 @@ export const mihomoRulesDisable = async (rules: Record<string, boolean>): Promis
 }
 
 export const mihomoUpgrade = async (channel: string): Promise<void> => {
+  const { core } = await getAppConfig()
+  if (core === 'system') throw new Error('本地内核不支持在线升级，请重新导入编译后的文件')
   if (process.platform === 'win32') await patchMihomoConfig({ 'log-level': 'info' })
   const instance = await getAxios()
   return await instance.post(`/upgrade?channel=${encodeURIComponent(channel)}`, undefined, {

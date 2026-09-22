@@ -16,6 +16,7 @@ import {
   restartCore,
   revokeCorePermission,
   findSystemMihomo,
+  getFilePath,
   deleteElevateTask,
   installService,
   uninstallService,
@@ -66,14 +67,18 @@ const Mihomo: React.FC = () => {
   const { ipv6 } = controledMihomoConfig || {}
 
   const [upgrading, setUpgrading] = useState(false)
+  const [changingCore, setChangingCore] = useState(false)
   const [showPermissionModal, setShowPermissionModal] = useState(false)
   const [showServiceModal, setShowServiceModal] = useState(false)
   const [systemCorePaths, setSystemCorePaths] = useState<string[]>(systemCorePathsCache || [])
   const [loadingPaths, setLoadingPaths] = useState(systemCorePathsCache === null)
+  const availableCorePaths = Array.from(
+    new Set(
+      [appConfig?.systemCorePath, ...systemCorePaths].filter((path): path is string => !!path)
+    )
+  )
 
   useEffect(() => {
-    if (systemCorePathsCache !== null) return
-
     getSystemCorePaths()
       .then(setSystemCorePaths)
       .catch(() => {})
@@ -85,13 +90,16 @@ const Mihomo: React.FC = () => {
     await restartCore()
   }
 
-  const handleConfigChangeWithRestart = async (key: string, value: unknown): Promise<void> => {
+  const handleConfigChangeWithRestart = async (patch: Partial<AppConfig>): Promise<void> => {
     try {
-      await patchAppConfig({ [key]: value })
+      setChangingCore(true)
+      if (!(await patchAppConfig(patch))) return
       await restartCore()
       PubSub.publish('mihomo-core-changed')
     } catch (e) {
       notify(e, { variant: 'danger' })
+    } finally {
+      setChangingCore(false)
     }
   }
 
@@ -111,29 +119,32 @@ const Mihomo: React.FC = () => {
     }
   }
 
-  const handleCoreChange = async (newCore: 'mihomo' | 'mihomo-alpha' | 'system'): Promise<void> => {
-    if (newCore === 'system') {
-      const paths = await getSystemCorePaths()
-
-      if (paths.length === 0) {
-        notify('未找到系统内核', {
-          body: '系统中未找到可用的 mihomo 或 clash 内核，已自动切换回内置内核'
-        })
-        return
+  const handleLocalCoreSelect = async (): Promise<void> => {
+    try {
+      const files = await getFilePath(['*'], '导入本地 Mihomo 内核', 'Mihomo 可执行文件')
+      if (files?.[0]) {
+        await handleConfigChangeWithRestart({ core: 'system', systemCorePath: files[0] })
       }
-
-      if (!appConfig?.systemCorePath || !paths.includes(appConfig.systemCorePath)) {
-        await patchAppConfig({ systemCorePath: paths[0] })
-      }
+    } catch (e) {
+      notify(e, { variant: 'danger' })
     }
-    handleConfigChangeWithRestart('core', newCore)
+  }
+
+  const handleCoreChange = async (newCore: AppConfig['core']): Promise<void> => {
+    if (newCore === 'system') {
+      const systemCorePath = appConfig?.systemCorePath || (await getSystemCorePaths())[0]
+      if (!systemCorePath) return handleLocalCoreSelect()
+      await handleConfigChangeWithRestart({ core: newCore, systemCorePath })
+    } else {
+      await handleConfigChangeWithRestart({ core: newCore })
+    }
   }
 
   const handlePermissionModeChange = async (key: string): Promise<void> => {
     if (key === corePermissionMode) return
 
     try {
-      await patchAppConfig({ corePermissionMode: key as 'elevated' | 'service' })
+      if (!(await patchAppConfig({ corePermissionMode: key as 'elevated' | 'service' }))) return
       await restartCore()
     } catch (e) {
       notify(e, { variant: 'danger' })
@@ -206,48 +217,52 @@ const Mihomo: React.FC = () => {
           }
           divider
         >
-          <Select
-            aria-label="内核版本"
-            classNames={{ trigger: 'data-[hover=true]:bg-default-200' }}
-            className="w-37.5"
-            size="sm"
-            selectedKeys={new Set([core])}
-            disallowEmptySelection={true}
-            onSelectionChange={(v) =>
-              handleCoreChange(v.currentKey as 'mihomo' | 'mihomo-alpha' | 'system')
-            }
-          >
-            <SelectItem key="mihomo">内置稳定版</SelectItem>
-            <SelectItem key="mihomo-alpha">内置预览版</SelectItem>
-            <SelectItem key="system">使用系统内核</SelectItem>
-          </Select>
+          <div className="flex items-center gap-2">
+            <Select
+              aria-label="内核版本"
+              classNames={{ trigger: 'data-[hover=true]:bg-default-200' }}
+              className="w-37.5"
+              size="sm"
+              selectedKeys={new Set([core])}
+              disallowEmptySelection={true}
+              isDisabled={changingCore}
+              onSelectionChange={(v) => handleCoreChange(v.currentKey as AppConfig['core'])}
+            >
+              <SelectItem key="mihomo">内置稳定版</SelectItem>
+              <SelectItem key="mihomo-alpha">内置预览版</SelectItem>
+              <SelectItem key="system">系统 / 本地内核</SelectItem>
+            </Select>
+            <Button size="sm" isLoading={changingCore} onPress={handleLocalCoreSelect}>
+              导入本地内核
+            </Button>
+          </div>
         </SettingItem>
         {core === 'system' && (
-          <SettingItem compatKey="legacy" title="系统内核路径选择" divider>
+          <SettingItem compatKey="legacy" title="内核文件路径" divider>
             <Select
-              aria-label="系统内核路径"
+              aria-label="内核文件路径"
               classNames={{ trigger: 'data-[hover=true]:bg-default-200' }}
               className="w-87.5"
               size="sm"
               selectedKeys={new Set([appConfig?.systemCorePath || ''])}
-              disallowEmptySelection={systemCorePaths.length > 0}
-              isDisabled={loadingPaths}
+              disallowEmptySelection={availableCorePaths.length > 0}
+              isDisabled={changingCore || (loadingPaths && availableCorePaths.length === 0)}
               onSelectionChange={(v) => {
                 const selectedPath = v.currentKey as string
-                if (selectedPath) handleConfigChangeWithRestart('systemCorePath', selectedPath)
+                if (selectedPath) handleConfigChangeWithRestart({ systemCorePath: selectedPath })
               }}
             >
-              {loadingPaths ? (
+              {availableCorePaths.length > 0 ? (
+                availableCorePaths.map((path) => <SelectItem key={path}>{path}</SelectItem>)
+              ) : loadingPaths ? (
                 <SelectItem key="">正在查找系统内核...</SelectItem>
-              ) : systemCorePaths.length > 0 ? (
-                systemCorePaths.map((path) => <SelectItem key={path}>{path}</SelectItem>)
               ) : (
                 <SelectItem key="">未找到系统内核</SelectItem>
               )}
             </Select>
-            {!loadingPaths && systemCorePaths.length === 0 && (
+            {!loadingPaths && availableCorePaths.length === 0 && (
               <div className="mt-2 text-sm text-warning">
-                未在系统中找到 mihomo 或 clash 内核，请安装后重试
+                可从任意目录导入内核，Sparkle 会保存独立副本
               </div>
             )}
           </SettingItem>
@@ -296,7 +311,11 @@ const Mihomo: React.FC = () => {
               size="sm"
               color="primary"
               selectedKey={serviceRunMode}
-              onSelectionChange={(key) => handleConfigChangeWithRestart('serviceRunMode', key)}
+              onSelectionChange={(key) =>
+                handleConfigChangeWithRestart({
+                  serviceRunMode: key as AppConfig['serviceRunMode']
+                })
+              }
             >
               <Tab key="auto" title="自动" />
               <Tab key="sandbox" title="沙盒" />
@@ -310,7 +329,11 @@ const Mihomo: React.FC = () => {
               size="sm"
               color="primary"
               selectedKey={coreStartupMode}
-              onSelectionChange={(key) => handleConfigChangeWithRestart('coreStartupMode', key)}
+              onSelectionChange={(key) =>
+                handleConfigChangeWithRestart({
+                  coreStartupMode: key as AppConfig['coreStartupMode']
+                })
+              }
             >
               <Tab key="post-up" title="Post Up" />
               <Tab key="log" title="日志解析" />

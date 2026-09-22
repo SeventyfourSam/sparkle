@@ -97,6 +97,10 @@ export function mihomoCoreDir(): string {
   return path.join(resourcesDir(), 'sidecar')
 }
 
+export function localCoreDir(): string {
+  return path.join(dataDir(), 'cores')
+}
+
 export function mihomoCorePath(core: string): string {
   if (core === 'mihomo' || core === 'mihomo-alpha') {
     const isWin = process.platform === 'win32'
