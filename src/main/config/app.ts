@@ -11,6 +11,8 @@ let appConfig: AppConfig
 let writePromise: Promise<void> = Promise.resolve()
 
 function applyBuildConfig(config: AppConfig): AppConfig {
+  // Custom Mihomo has one stable release channel; migrate the old alpha selection.
+  if (config.core === 'mihomo-alpha') config = { ...config, core: 'mihomo' }
   if (!systemCoreOnlyBuild) return config
 
   return {

@@ -247,12 +247,8 @@ const Mihomo: React.FC = () => {
               </Select.Trigger>
               <Select.Popover placement="bottom" shouldFlip containerPadding={56}>
                 <ListBox>
-                  <ListBox.Item key="mihomo" id="mihomo" textValue="内置稳定版">
-                    内置稳定版
-                    <ListBox.ItemIndicator />
-                  </ListBox.Item>
-                  <ListBox.Item key="mihomo-alpha" id="mihomo-alpha" textValue="内置预览版">
-                    内置预览版
+                  <ListBox.Item key="mihomo" id="mihomo" textValue="内置自定义版">
+                    内置自定义版
                     <ListBox.ItemIndicator />
                   </ListBox.Item>
                   <ListBox.Item key="system" id="system" textValue="系统 / 本地内核">

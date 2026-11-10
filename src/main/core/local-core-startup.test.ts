@@ -94,54 +94,62 @@ test('cancelled or ineffective authorization fails and symlinks are rejected', a
   assert.equal(fixture.calls.length, 0)
 })
 
-test('macOS and Linux grant commands quote paths literally; Windows has no setuid prompt', async () => {
-  const corePath = '/managed/空 格\'"$HOME`printf injected`$(printf injected)\\/local-one/mihomo'
-  for (const platform of ['darwin', 'linux']) {
-    const fixture = permissionFixture(platform)
-    await fixture.ensureLocalCorePermission(corePath)
-    const call = fixture.calls[0]
-    const shell =
-      platform === 'darwin'
-        ? JSON.parse(
-            call.args[1].slice('do shell script '.length, -' with administrator privileges'.length)
-          )
-        : call.args[2]
-    assert.equal(call.file, platform === 'darwin' ? '/usr/bin/osascript' : 'pkexec')
-    // Replace only the program names with an inert recorder, then parse via a real shell.
-    const inert = shell
-      .replace(/(?:\/usr\/sbin\/)?chown /, 'record ')
-      .replace(/(?:\/bin\/)?chmod /, 'record ')
-    const result = execFileSync('/bin/sh', ['-c', `record() { printf '%s\\0' "$@"; }; ${inert}`])
-    assert.deepEqual(result.toString().split('\0'), [
-      platform === 'darwin' ? 'root:admin' : 'root:root',
-      corePath,
-      '4555',
-      corePath,
-      ''
-    ])
-    if (platform === 'darwin' && process.platform === 'darwin') {
-      const script = `record() { printf '%s\\n' "$@"; }; ${inert}`
-      const appleScript = execFileSync(
-        '/usr/bin/osascript',
-        ['-e', `do shell script ${JSON.stringify(script)}`],
-        { encoding: 'utf8' }
-      )
-      assert.equal(
-        appleScript.replaceAll('\r', '\n'),
-        ['root:admin', corePath, '4555', corePath, ''].join('\n')
-      )
+test(
+  'macOS and Linux grant commands quote paths literally; Windows has no setuid prompt',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const corePath = '/managed/空 格\'"$HOME`printf injected`$(printf injected)\\/local-one/mihomo'
+    for (const platform of ['darwin', 'linux']) {
+      const fixture = permissionFixture(platform)
+      await fixture.ensureLocalCorePermission(corePath)
+      const call = fixture.calls[0]
+      const shell =
+        platform === 'darwin'
+          ? JSON.parse(
+              call.args[1].slice(
+                'do shell script '.length,
+                -' with administrator privileges'.length
+              )
+            )
+          : call.args[2]
+      assert.equal(call.file, platform === 'darwin' ? '/usr/bin/osascript' : 'pkexec')
+      // Replace only the program names with an inert recorder, then parse via a real shell.
+      const inert = shell
+        .replace(/(?:\/usr\/sbin\/)?chown /, 'record ')
+        .replace(/(?:\/bin\/)?chmod /, 'record ')
+      const result = execFileSync('/bin/sh', ['-c', `record() { printf '%s\\0' "$@"; }; ${inert}`])
+      assert.deepEqual(result.toString().split('\0'), [
+        platform === 'darwin' ? 'root:admin' : 'root:root',
+        corePath,
+        '4555',
+        corePath,
+        ''
+      ])
+      if (platform === 'darwin' && process.platform === 'darwin') {
+        const script = `record() { printf '%s\\n' "$@"; }; ${inert}`
+        const appleScript = execFileSync(
+          '/usr/bin/osascript',
+          ['-e', `do shell script ${JSON.stringify(script)}`],
+          { encoding: 'utf8' }
+        )
+        assert.equal(
+          appleScript.replaceAll('\r', '\n'),
+          ['root:admin', corePath, '4555', corePath, ''].join('\n')
+        )
+      }
     }
+    const windows = permissionFixture('win32')
+    await windows.ensureLocalCorePermission('C:\\managed\\mihomo.exe')
+    assert.equal(windows.calls.length, 0)
   }
-  const windows = permissionFixture('win32')
-  await windows.ensureLocalCorePermission('C:\\managed\\mihomo.exe')
-  assert.equal(windows.calls.length, 0)
-})
+)
 
 function ipcFixture(current: Partial<AppConfig>, cancelled = false) {
   const events: string[] = []
   const config = { ...current }
   const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>()
   const ipc = load<{ registerIpcMainHandlers: () => void }>('../utils/ipc.ts', {
+    '../resolve/webhook': { webhookOperationCategories: new Map() },
     electron: {
       ipcMain: {
         handle: (name: string, fn: (...args: unknown[]) => Promise<unknown>) =>
@@ -259,6 +267,7 @@ function managerFixture(
   }
   const chain = load('./startup-chain.ts', { '../utils/dirs': dirs })
   const manager = load<typeof import('./manager')>('./manager.ts', {
+    '../resolve/webhook': { notifyCoreStarted: noop, notifyCoreStopped: noop, emitWebhook: noop },
     child_process: {
       spawn: (file: string) => {
         events.push(`spawn:${file}`)

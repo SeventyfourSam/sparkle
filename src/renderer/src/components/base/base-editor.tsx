@@ -8,6 +8,7 @@ import { nanoid } from 'nanoid'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
 import { MonacoDiffEditor, MonacoEditor, type EditorOptions } from './monaco-editor'
 import { configureMonacoWorkers } from './monaco-workers'
+import { customMihomoProperties } from '@renderer/utils/mihomo-schema'
 type Language = 'yaml' | 'javascript' | 'css' | 'json' | 'text'
 
 const LONG_LINE_LIMIT = 1000
@@ -77,6 +78,7 @@ const monacoInitialization = (): void => {
         // @ts-ignore // type JSONSchema7
         schema: {
           ...metaSchema,
+          properties: customMihomoProperties,
           patternProperties: {
             '\\+rules': {
               type: 'array',

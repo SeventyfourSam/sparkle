@@ -411,6 +411,10 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     }
   }
 
+  if (appConfig.customMihomo?.path === corePath && !useServiceCore) {
+    await ensureLocalCorePermission(corePath)
+  }
+
   await generateProfile()
   if (useServiceCore || detached) {
     await checkProfile()
@@ -473,7 +477,8 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
   if (useServiceCore) {
     const serviceProfile: ServiceCoreLaunchProfile = {
       core_path: corePath,
-      skip_hardening: systemCoreOnlyBuild || core === 'system',
+      skip_hardening:
+        systemCoreOnlyBuild || core === 'system' || appConfig.customMihomo?.path === corePath,
       args: spawnArgs,
       mode: serviceRunMode,
       safe_paths: safePaths,

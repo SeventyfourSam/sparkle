@@ -13,12 +13,16 @@
 - [x] 开箱即用，无需服务模式的 Tun
 - [x] 多种配色主题可选，UI 焕然一新
 - [x] 支持大部分 Mihomo 常用配置修改
-- [x] 内置稳定版和预览版 Mihomo 内核
+- [x] 内置自定义 Mihomo 内核，支持 HOST/IP hook 和 UDP 规则回退控制
 - [x] 通过 WebDAV 一键备份和恢复配置
 - [x] 强大的覆写功能，任意修订配置文件
 - [x] 深度集成 Sub-Store，轻松管理订阅
 
 ## 开发
+
+此 fork 的自定义改动在 `custom` 分支，内核来自
+[SeventyfourSam/mihomo](https://github.com/SeventyfourSam/mihomo/releases/latest)。
+支持 Windows x64 和 macOS arm64，配置及打包说明见 [自定义 Mihomo](docs/custom-mihomo.md)。
 
 本项目为自用，绝大部分 pr 可能都不会合并，你可以自行 fork 修改。
 

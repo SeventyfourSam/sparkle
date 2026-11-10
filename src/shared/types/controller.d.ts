@@ -32,6 +32,7 @@ interface ControllerConfigs {
   'geodata-loader': string
   'geosite-matcher': string
   'tcp-concurrent': boolean
+  'udp-fallback'?: boolean
   'find-process-mode': string
   sniffing: true
   'global-client-fingerprint': string

@@ -1,0 +1,49 @@
+name: Custom Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            command: build:win
+          - os: macos-latest
+            arch: arm64
+            command: build:mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm install -g pnpm@11.1.1
+      - name: Install and prepare custom Mihomo
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Regression tests
+        run: pnpm test:custom
+      - name: Build
+        run: pnpm ${{ matrix.command }} --${{ matrix.arch }}
+      - name: Add portable flag
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -Path PORTABLE -ItemType File
+          Get-ChildItem dist/*portable.7z | ForEach-Object { 7z a $_.FullName PORTABLE }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sparkle-custom-${{ runner.os }}-${{ matrix.arch }}
+          path: |
+            dist/sparkle*setup.exe
+            dist/sparkle*portable.7z
+            dist/sparkle*.pkg
+          if-no-files-found: error

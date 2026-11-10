@@ -1,10 +1,11 @@
 import { is } from '@electron-toolkit/utils'
-import { existsSync, mkdirSync, readdirSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'fs'
 import { app } from 'electron'
 import path from 'path'
 import { execSync } from 'child_process'
 import { getAppConfigSync } from '../config/app'
 import { checkCorePermissionPathSync } from '../core/permission-check'
+import { compareMihomoVersions } from '../../shared/mihomo-release'
 import {
   systemCoreDefaultPath,
   systemCoreOnlyBuild,
@@ -111,6 +112,21 @@ export function localCoreDir(): string {
 
 export function mihomoCorePath(core: string): string {
   if (core === 'mihomo' || core === 'mihomo-alpha') {
+    const { customMihomo } = getAppConfigSync()
+    if (customMihomo?.path && existsSync(customMihomo.path)) {
+      let bundledVersion = ''
+      try {
+        bundledVersion = readFileSync(
+          path.join(mihomoCoreDir(), 'mihomo-version.txt'),
+          'utf-8'
+        ).trim()
+      } catch {
+        // Older bundles did not include a version manifest.
+      }
+      if (compareMihomoVersions(customMihomo.version, bundledVersion) >= 0) {
+        return customMihomo.path
+      }
+    }
     const isWin = process.platform === 'win32'
     return path.join(mihomoCoreDir(), `${core}${isWin ? '.exe' : ''}`)
   }
