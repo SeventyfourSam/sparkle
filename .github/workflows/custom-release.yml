@@ -122,7 +122,7 @@ jobs:
           - os: windows-latest
             arch: x64
             command: build:win
-          - os: macos-latest
+          - os: macos-15
             arch: arm64
             command: build:mac
     runs-on: ${{ matrix.os }}
