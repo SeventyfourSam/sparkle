@@ -92,7 +92,6 @@ export const defaultControledMihomoConfig: Partial<MihomoConfig> = {
   'allow-lan': false,
   'unified-delay': false,
   'tcp-concurrent': false,
-  'udp-fallback': true,
   'log-level': 'info',
   'find-process-mode': 'always',
   'interface-name': '',
@@ -117,7 +116,6 @@ export const defaultControledMihomoConfig: Partial<MihomoConfig> = {
   },
   dns: {
     enable: true,
-    listen: '',
     ipv6: true,
     'respect-rules': false,
     'enhanced-mode': 'fake-ip',

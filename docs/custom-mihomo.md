@@ -1,6 +1,6 @@
 # 自定义 Mihomo
 
-`custom` 分支基于 Sparkle 上游稳定版 `1.26.10`，当前应用版本为 `1.26.10-custom.1`。
+`custom` 分支基于 Sparkle 上游稳定版 `1.26.10`，当前应用版本为 `1.26.10-custom.2`。
 内置内核及在线更新均使用 [SeventyfourSam/mihomo 的正式 Release](https://github.com/SeventyfourSam/mihomo/releases/latest)。
 当前提供 Windows x64 和 macOS arm64，首次接入的版本为 `v1.19.33-custom.2`。
 构建及更新按 Release 中的实际文件名下载，并验证 `SHA256SUMS`；不回退到官方内核。
@@ -73,3 +73,5 @@ macOS arm64 在对应平台运行 `pnpm build:mac --arm64`。
 `prepare` 会准备自定义内核及原有资源，首次安装需联网。
 输出在 `dist`；Windows 便携包需在归档根目录加入空文件 `PORTABLE`。
 GitHub Actions 的 `Custom Build` 工作流可手动构建上述两个平台，并上传构建产物，不自动发布 Release。
+
+定制代码的目录和上游接入点见 [定制模块维护说明](customization.md)。

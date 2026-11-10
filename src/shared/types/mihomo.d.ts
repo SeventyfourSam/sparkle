@@ -15,7 +15,6 @@ interface MihomoConfig {
   'allow-lan': boolean
   'unified-delay': boolean
   'tcp-concurrent': boolean
-  'udp-fallback'?: boolean
   'interface-name': string
   'global-client-fingerprint': Fingerprints
   'log-level': LogLevel
@@ -51,21 +50,6 @@ interface MihomoConfig {
   profile: MihomoProfileConfig
   'rule-providers'?: Record<string, unknown>
   'proxy-providers'?: Record<string, unknown>
-  'hook-providers'?: Record<string, MihomoHookProvider>
-  hooks?: { event: 'HOST' | 'IP'; match: string; providers: string[] }[]
-}
-
-interface MihomoHookProvider {
-  type: 'api' | 'script'
-  mode?: 'sync' | 'async'
-  timeout?: string
-  'on-error'?: 'block' | 'continue'
-  'confirmation-ttl'?: string
-  url?: string
-  headers?: Record<string, string>
-  'success-status'?: number
-  command?: string
-  args?: string[]
 }
 
 interface MihomoTunConfig {

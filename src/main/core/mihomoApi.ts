@@ -9,6 +9,7 @@ import { floatingWindow } from '../resolve/floatingWindow'
 import { mihomoIpcPath, serviceIpcPath } from '../utils/dirs'
 import { publishMihomoLog } from '../utils/log'
 import { createSignedServiceAxios, getServiceAuthHeaders } from '../service/api'
+import { prepareMihomoSystemDnsRuntimePatch } from '../sys/mihomo-system-dns'
 
 let axiosIns: AxiosInstance = null!
 let mihomoTrafficWs: WebSocket | null = null
@@ -98,6 +99,7 @@ export const mihomoConfig = async (): Promise<ControllerConfigs> => {
 }
 
 export const patchMihomoConfig = async (patch: Partial<ControllerConfigs>): Promise<void> => {
+  await prepareMihomoSystemDnsRuntimePatch(patch)
   const instance = await getAxios()
   return await instance.patch('/configs', patch)
 }

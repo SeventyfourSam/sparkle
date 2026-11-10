@@ -39,7 +39,6 @@ interface AppConfig {
   showUpdateButtonAfterNotification?: boolean
   core: 'mihomo' | 'mihomo-alpha' | 'system'
   systemCorePath?: string
-  customMihomo?: { path: string; version: string }
   corePermissionMode?: 'elevated' | 'service'
   serviceRunMode?: 'auto' | 'sandbox' | 'direct'
   serviceCpuAffinity?: number[]

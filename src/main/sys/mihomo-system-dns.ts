@@ -1,9 +1,4 @@
-import {
-  getAppConfig,
-  getControledMihomoConfig,
-  patchAppConfig,
-  patchControledMihomoConfig
-} from '../config'
+import { getAppConfig, getControledMihomoConfig, patchAppConfig } from '../config'
 import { getRuntimeConfig } from '../core/factory'
 import {
   acquireMihomoDnsLease,
@@ -140,15 +135,9 @@ export async function releaseMihomoSystemDNSLease(): Promise<void> {
   await appendAppLog('[DNS]: restored macOS default resolver\n')
 }
 
-/** Route controlled DNS/Tun/listener disables through resolver release first. */
-export async function patchControlledConfigSafely(patch: Partial<MihomoConfig>): Promise<void> {
-  if (isDisablingMihomoListenerPatch(patch)) await releaseMihomoSystemDNSLease()
-  await patchControledMihomoConfig(patch)
-}
-
 /** Runtime-only shutdowns also release the system resolver before the listener. */
 export async function prepareMihomoSystemDnsRuntimePatch(
-  patch: Partial<MihomoConfig>
+  patch: Pick<Partial<MihomoConfig>, 'tun' | 'dns'>
 ): Promise<void> {
   if (process.platform !== 'darwin' || !isDisablingMihomoListenerPatch(patch)) return
   await releaseMihomoSystemDNSLease()

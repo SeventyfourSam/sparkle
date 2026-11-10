@@ -6,13 +6,13 @@ import { defaultConfig } from '../utils/template'
 import { readFileSync, existsSync } from 'fs'
 import { systemCoreDefaultPath, systemCoreOnlyBuild } from '../../shared/build-flags'
 import { notifyConfigOperation } from '../resolve/webhook'
+import { customizeAppConfig, prepareCustomAppPatch } from '../custom/config'
 
 let appConfig: AppConfig
 let writePromise: Promise<void> = Promise.resolve()
 
 function applyBuildConfig(config: AppConfig): AppConfig {
-  // Custom Mihomo has one stable release channel; migrate the old alpha selection.
-  if (config.core === 'mihomo-alpha') config = { ...config, core: 'mihomo' }
+  config = customizeAppConfig(config)
   if (!systemCoreOnlyBuild) return config
 
   return {
@@ -80,6 +80,7 @@ export async function patchAppConfig(patch: Partial<AppConfig>): Promise<AppConf
   const previousPromise = writePromise
   const currentPromise = (async () => {
     await previousPromise
+    patch = await prepareCustomAppPatch(patch, appConfig)
     const nextConfig = applyBuildConfig(deepMerge(structuredClone(appConfig), patch))
     await safeWriteConfig(stringifyYaml(nextConfig))
     appConfig = nextConfig

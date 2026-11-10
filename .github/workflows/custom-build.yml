@@ -31,6 +31,11 @@ jobs:
         run: pnpm typecheck
       - name: Regression tests
         run: pnpm test:custom
+      - name: Verify macOS DNS helper
+        if: runner.os == 'macOS'
+        run: |
+          file extra/files/sparkle-dns-helper | grep -q 'Mach-O 64-bit executable arm64'
+          extra/files/sparkle-dns-helper self-test --json
       - name: Build
         run: pnpm ${{ matrix.command }} --${{ matrix.arch }}
       - name: Add portable flag

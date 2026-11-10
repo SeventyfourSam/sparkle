@@ -28,6 +28,7 @@ import {
   getAppConfig,
   patchAppConfig,
   getControledMihomoConfig,
+  patchControledMihomoConfig,
   getProfileConfig,
   getCurrentProfileItem,
   getProfileItem,
@@ -62,11 +63,6 @@ import {
 } from '../resolve/server'
 import { quitWithoutCore, restartCore, startNetworkDetection, stopCore } from '../core/manager'
 import { stopNetworkDetection } from '../core/network'
-import {
-  patchControlledConfigSafely,
-  prepareMihomoSystemDnsAppPatch,
-  prepareMihomoSystemDnsRuntimePatch
-} from '../sys/mihomo-system-dns'
 import {
   checkCorePermission,
   manualGrantCorePermition,
@@ -107,9 +103,8 @@ import {
   resumeLanternDHCP,
   setLanternGatewayDevices
 } from '../service/api'
-import { coreLogPath, findSystemMihomo, localCoreDir, logDir } from './dirs'
+import { coreLogPath, findSystemMihomo, logDir } from './dirs'
 import { systemCoreOnlyBuild } from '../../shared/build-flags'
-import { ensureLocalCorePermission, importLocalCore } from '../core/local-core'
 import {
   getRuntimeConfig,
   getRuntimeConfigStr,
@@ -186,24 +181,6 @@ function ipcErrorWrapper<T>( // eslint-disable-next-line @typescript-eslint/no-e
 }
 
 async function patchAppConfigWithServiceSync(patch: Partial<AppConfig>): Promise<AppConfig> {
-  const currentConfig = await getAppConfig()
-  const nextCore = patch.core ?? currentConfig.core
-  if (patch.systemCorePath || (nextCore === 'system' && (patch.core || patch.corePermissionMode))) {
-    patch = {
-      ...patch,
-      systemCorePath: await importLocalCore(
-        patch.systemCorePath || currentConfig.systemCorePath || '',
-        localCoreDir()
-      )
-    }
-    if (
-      nextCore === 'system' &&
-      (patch.corePermissionMode ?? currentConfig.corePermissionMode) !== 'service'
-    ) {
-      await ensureLocalCorePermission(patch.systemCorePath!)
-    }
-  }
-  patch = await prepareMihomoSystemDnsAppPatch(patch, currentConfig)
   if (patch.webhook) {
     const { webhook } = await getAppConfig()
     validateWebhookConfig({ ...webhook, ...patch.webhook })
@@ -269,11 +246,6 @@ async function normalizeServiceModePatch(patch: Partial<AppConfig>): Promise<Par
   }
 }
 
-async function patchMihomoConfigFromRenderer(patch: Partial<MihomoConfig>): Promise<void> {
-  await prepareMihomoSystemDnsRuntimePatch(patch)
-  return await patchMihomoConfig(patch as Partial<ControllerConfigs>)
-}
-
 export function registerIpcMainHandlers(): void {
   const handle = (channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void => {
     const category = webhookOperationCategories.get(channel)
@@ -320,7 +292,7 @@ export function registerIpcMainHandlers(): void {
   )
   handle('mihomoGroupDelay', (_e, group, url) => ipcErrorWrapper(mihomoGroupDelay)(group, url))
   handle('mihomoRulesDisable', (_e, rules) => ipcErrorWrapper(mihomoRulesDisable)(rules))
-  handle('patchMihomoConfig', (_e, patch) => ipcErrorWrapper(patchMihomoConfigFromRenderer)(patch))
+  handle('patchMihomoConfig', (_e, patch) => ipcErrorWrapper(patchMihomoConfig)(patch))
   handle('restartMihomoLogs', ipcErrorWrapper(restartMihomoLogs))
   handle('checkAutoRun', ipcErrorWrapper(checkAutoRun))
   handle('enableAutoRun', ipcErrorWrapper(enableAutoRun))
@@ -333,7 +305,7 @@ export function registerIpcMainHandlers(): void {
     ipcErrorWrapper(getControledMihomoConfig)(force)
   )
   handle('patchControledMihomoConfig', (_e, config) =>
-    ipcErrorWrapper(patchControlledConfigSafely)(config)
+    ipcErrorWrapper(patchControledMihomoConfig)(config)
   )
   handle('getProfileConfig', (_e, force) => ipcErrorWrapper(getProfileConfig)(force))
   handle('setProfileConfig', (_e, config) => ipcErrorWrapper(setProfileConfig)(config))

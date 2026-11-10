@@ -53,12 +53,13 @@ locked restore/apply transaction.
 The packaged helper also supports `self-test --json`. This is a non-mutating
 native parser test for successful, truncated, malformed, wrong-ID, and DNS
 error responses; it opens no sockets and does not access SystemConfiguration.
-CI runs it alongside the TypeScript helper tests on both macOS architectures.
+The separate `Custom Build` workflow runs it alongside the TypeScript helper tests
+for the currently packaged macOS arm64 target.
 
 `pnpm build:dns-helper -- --arch=arm64` and `--arch=x64` compile the Swift
 source with SystemConfiguration/CoreFoundation against macOS 10.15. The
 prepare step runs this only for Darwin targets; `extraResources` packages the
-resulting binary in both macOS architectures. Non-Darwin development and
+resulting binary for the selected macOS architecture. Non-Darwin development and
 builds skip Swift compilation and retain the existing DNS behavior.
 
 Automated tests intentionally use protocol/state fakes and do not invoke

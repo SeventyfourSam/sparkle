@@ -4,8 +4,8 @@ import React, { useEffect, useRef, useState } from 'react'
 import { downloadAndInstallUpdate } from '@renderer/utils/ipc'
 import { platform } from '@renderer/utils/init'
 import { notify } from '@renderer/utils/notification'
-import { version as currentVersion } from '@renderer/utils/init'
 import { FiX, FiDownload } from 'react-icons/fi'
+import { allowOfficialAppUpdates } from '@renderer/custom/policy'
 
 interface Props {
   version: string
@@ -82,10 +82,9 @@ const UpdaterDrawer: React.FC<Props> = (props) => {
   }
 
   const isDownloading = updateStatus?.downloading || downloading
-  const isCustomBuild = currentVersion.includes('-custom.')
   const releaseTag = tag ?? (version.includes('-rolling-') ? 'rolling' : version)
   const releaseUrl = `https://github.com/xishang0128/sparkle/releases/tag/${releaseTag}`
-  const releaseLink = !isDownloading && !isCustomBuild && (
+  const releaseLink = !isDownloading && allowOfficialAppUpdates() && (
     <Link
       className={
         isLinux
@@ -194,7 +193,7 @@ const UpdaterDrawer: React.FC<Props> = (props) => {
                     '取消'
                   )}
                 </Button>
-                {!updateStatus?.downloading && !isCustomBuild && (
+                {!updateStatus?.downloading && allowOfficialAppUpdates() && (
                   <Button
                     size="sm"
                     className="h-8 min-w-0 px-3 text-sm leading-none"

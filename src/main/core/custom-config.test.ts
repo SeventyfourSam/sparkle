@@ -6,10 +6,12 @@ import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 import { parse, stringify } from 'yaml'
 import { deepMerge } from '../utils/merge'
+import { finalizeCustomProfile } from '../custom/profile'
 
-async function generate(controlled: Partial<MihomoConfig>, rawFallback = true) {
+async function generate(controlled: Partial<MihomoConfig>, rawFallback = true, controlDns = false) {
   const raw = {
     'udp-fallback': rawFallback,
+    dns: { enable: true, listen: '127.0.0.1:1053' },
     'hook-providers': {
       Confirm: { type: 'api', mode: 'sync', url: 'http://127.0.0.1:1234/ip', 'on-error': 'block' }
     },
@@ -17,8 +19,9 @@ async function generate(controlled: Partial<MihomoConfig>, rawFallback = true) {
   }
   let written = ''
   const mocks = {
+    '../custom/profile': { finalizeCustomProfile },
     '../config': {
-      getAppConfig: async () => ({ controlDns: false, controlSniff: false }),
+      getAppConfig: async () => ({ controlDns, controlSniff: false }),
       getProfileConfig: async () => ({}),
       getProfileStr: async () => stringify(raw),
       getProfileItem: async () => ({}),
@@ -63,4 +66,9 @@ test('controlled udp-fallback true overrides profile false', async () => {
 
 test('an older controlled config preserves a handwritten udp-fallback false', async () => {
   assert.equal((await generate({}, false))['udp-fallback'], false)
+})
+
+test('a controlled empty listener blocks a subscription listener and is omitted from runtime YAML', async () => {
+  const config = await generate({ dns: { enable: true, listen: '' } }, true, true)
+  assert.equal(Object.hasOwn(config.dns, 'listen'), false)
 })

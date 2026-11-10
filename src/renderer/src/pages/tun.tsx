@@ -10,8 +10,7 @@ import { platform } from '@renderer/utils/init'
 import React, { Key, useState } from 'react'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
 import { notify } from '@renderer/utils/notification'
-
-const showLegacyMacDnsControl = false
+import { showLegacyMacDnsControl } from '@renderer/custom/policy'
 
 const Tun: React.FC = () => {
   const { controledMihomoConfig, patchControledMihomoConfig } = useControledMihomoConfig()

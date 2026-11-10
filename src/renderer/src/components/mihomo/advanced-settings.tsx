@@ -7,13 +7,13 @@ import InterfaceSelect from '../base/interface-select'
 import { restartCore } from '@renderer/utils/ipc'
 import { useState } from 'react'
 import { IoIosHelpCircle } from 'react-icons/io'
+import UdpFallbackSetting from '@renderer/custom/udp-fallback-setting'
 
 const AdvancedSetting: React.FC = () => {
   const { controledMihomoConfig, patchControledMihomoConfig } = useControledMihomoConfig()
   const {
     'unified-delay': unifiedDelay,
     'tcp-concurrent': tcpConcurrent,
-    'udp-fallback': udpFallback = true,
     'disable-keep-alive': disableKeepAlive = false,
     'find-process-mode': findProcessMode = 'always',
     'interface-name': interfaceName = '',
@@ -155,34 +155,7 @@ const AdvancedSetting: React.FC = () => {
           </Switch.Content>
         </Switch>
       </SettingItem>
-      <SettingItem
-        compatKey="legacy"
-        title="UDP 规则回退"
-        actions={
-          <Tooltip delay={0}>
-            <Button isIconOnly size="sm" variant="ghost" data-color="default">
-              <IoIosHelpCircle className="text-lg" />
-            </Button>
-            <Tooltip.Content>
-              命中的出站不支持 UDP 时继续匹配后续规则。关闭后直接失败，仅影响新建 UDP 关联。
-            </Tooltip.Content>
-          </Tooltip>
-        }
-        divider
-      >
-        <Switch
-          size="sm"
-          isSelected={udpFallback}
-          onChange={(v) => onChangeNeedRestart({ 'udp-fallback': v })}
-          aria-label="UDP 规则回退"
-        >
-          <Switch.Content>
-            <Switch.Control>
-              <Switch.Thumb />
-            </Switch.Control>
-          </Switch.Content>
-        </Switch>
-      </SettingItem>
+      <UdpFallbackSetting />
       <SettingItem compatKey="legacy" title="禁用 TCP Keep Alive" divider>
         <Switch
           size="sm"

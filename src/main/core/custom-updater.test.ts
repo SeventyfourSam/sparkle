@@ -39,7 +39,7 @@ function fixture(
       writeFile: async () => events.push('stage'),
       rm: async () => events.push('cleanup')
     },
-    '../utils/dirs': { localCoreDir: () => '/managed' },
+    '../custom/paths': { localCoreDir: () => '/managed' },
     '../utils/log': { appendAppLog: async () => {} },
     '../../shared/mihomo-release': {
       getMihomoRelease: async () => ({ version: next.version, executableName: 'mihomo' }),

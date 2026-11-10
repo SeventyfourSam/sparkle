@@ -1,4 +1,5 @@
 import { Button, Input, Tooltip, Switch, Tabs } from '@heroui/react'
+import DnsListenSetting from '@renderer/custom/dns-listen-setting'
 
 import BasePage from '@renderer/components/base/base-page'
 import SettingCard from '@renderer/components/base/base-setting-card'
@@ -8,15 +9,13 @@ import AdvancedDnsSetting from '@renderer/components/dns/advanced-dns-setting'
 import { useControledMihomoConfig } from '@renderer/hooks/use-controled-mihomo-config'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
 import { restartCore } from '@renderer/utils/ipc'
-import { platform } from '@renderer/utils/init'
 import React, { Key, useState } from 'react'
 import { notify } from '@renderer/utils/notification'
 import {
   isValidIPv4Cidr,
   isValidIPv6Cidr,
   isValidDomainWildcard,
-  isValidDnsServer,
-  isValidListenAddress
+  isValidDnsServer
 } from '@renderer/utils/validate'
 
 const DNS: React.FC = () => {
@@ -45,8 +44,7 @@ const DNS: React.FC = () => {
     'proxy-server-nameserver': proxyServerNameserver = [],
     'direct-nameserver': directNameserver = [],
     'nameserver-policy': nameserverPolicy = {},
-    'proxy-server-nameserver-policy': proxyServerNameserverPolicy = {},
-    listen = ''
+    'proxy-server-nameserver-policy': proxyServerNameserverPolicy = {}
   } = dns || {}
   const [changed, setChanged] = useState(false)
   const [values, originSetValues] = useState({
@@ -64,7 +62,6 @@ const DNS: React.FC = () => {
     directNameserver,
     nameserverPolicy,
     proxyServerNameserverPolicy,
-    listen,
     hosts: useHosts ? hosts : undefined
   })
   const [fakeIPRangeError, setFakeIPRangeError] = useState<string | null>(() => {
@@ -91,13 +88,7 @@ const DNS: React.FC = () => {
     return firstInvalid ? (isValidDnsServer(firstInvalid).error ?? '格式错误') : null
   })
   const [advancedDnsError, setAdvancedDnsError] = useState(false)
-  const [listenError, setListenError] = useState<string | null>(() => {
-    const result = isValidListenAddress(listen)
-    return result.ok ? null : (result.error ?? '格式错误')
-  })
-  const hasDnsErrors = Boolean(
-    defaultNameserverError || nameserverError || advancedDnsError || listenError
-  )
+  const hasDnsErrors = Boolean(defaultNameserverError || nameserverError || advancedDnsError)
 
   const setValues = (v: typeof values): void => {
     originSetValues(v)
@@ -144,10 +135,7 @@ const DNS: React.FC = () => {
                 'proxy-server-nameserver': values.proxyServerNameserver,
                 'direct-nameserver': values.directNameserver,
                 'nameserver-policy': values.nameserverPolicy,
-                'proxy-server-nameserver-policy': values.proxyServerNameserverPolicy,
-                // Persist an explicit empty sentinel so a subscription-provided
-                // dns.listen is cleared by the controlled configuration layer.
-                listen: values.listen.trim()
+                'proxy-server-nameserver-policy': values.proxyServerNameserverPolicy
               }
               onSave({
                 dns: dnsConfig,
@@ -172,6 +160,7 @@ const DNS: React.FC = () => {
       }
     >
       <SettingCard>
+        <DnsListenSetting />
         <SettingItem compatKey="legacy" title="IPv6" divider>
           <Switch
             size="sm"
@@ -187,31 +176,6 @@ const DNS: React.FC = () => {
               </Switch.Control>
             </Switch.Content>
           </Switch>
-        </SettingItem>
-        <SettingItem
-          compatKey="legacy"
-          title={platform === 'darwin' ? 'DNS 监听地址（自动接管系统 DNS）' : 'DNS 监听地址'}
-          divider
-        >
-          <Tooltip isOpen={Boolean(listenError)}>
-            <Input
-              data-size="sm"
-              className={
-                `w-[40%] ` + (listenError ? 'border-red-500 ring-1 ring-red-500 rounded-lg' : '')
-              }
-              placeholder="例：127.0.0.1:1053（留空禁用）"
-              value={values.listen}
-              onChange={(event) => {
-                const v = event.target.value
-                setValues({ ...values, listen: v })
-                const result = isValidListenAddress(v)
-                setListenError(result.ok ? null : (result.error ?? '格式错误'))
-              }}
-            />
-            <Tooltip.Content placement="right" offset={15} className="text-danger">
-              {listenError}
-            </Tooltip.Content>
-          </Tooltip>
         </SettingItem>
         <SettingItem compatKey="legacy" title="域名映射模式" divider>
           <Tabs

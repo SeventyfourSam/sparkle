@@ -8,6 +8,7 @@ import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
+import { deepMerge } from '../utils/merge'
 
 const nativeRequire = createRequire(import.meta.url)
 
@@ -31,6 +32,7 @@ function load<T>(file: string, mocks: Record<string, unknown>, platform = 'darwi
       require: (id: string) => mocks[id] ?? (isBuiltin(id) ? nativeRequire(id) : {}),
       process: { platform, env: {} },
       Buffer,
+      structuredClone,
       setTimeout,
       clearTimeout
     },
@@ -146,24 +148,10 @@ test(
 
 function ipcFixture(current: Partial<AppConfig>, cancelled = false) {
   const events: string[] = []
-  const config = { ...current }
+  const config = { sysProxy: { enable: false }, ...current }
   const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>()
-  const ipc = load<{ registerIpcMainHandlers: () => void }>('../utils/ipc.ts', {
-    '../resolve/webhook': { webhookOperationCategories: new Map() },
-    electron: {
-      ipcMain: {
-        handle: (name: string, fn: (...args: unknown[]) => Promise<unknown>) =>
-          handlers.set(name, fn)
-      }
-    },
-    '../config': {
-      getAppConfig: async () => config,
-      patchAppConfig: async (patch: Partial<AppConfig>) => {
-        events.push('save')
-        return Object.assign(config, patch)
-      }
-    },
-    './dirs': { localCoreDir: () => '/managed' },
+  const customConfig = load<typeof import('../custom/config')>('../custom/config.ts', {
+    './paths': { localCoreDir: () => '/managed' },
     '../core/local-core': {
       importLocalCore: async (source: string) => {
         events.push(`import:${source}`)
@@ -181,11 +169,45 @@ function ipcFixture(current: Partial<AppConfig>, cancelled = false) {
       }
     }
   })
+  const appConfig = load<typeof import('../config/app')>('../config/app.ts', {
+    '../custom/config': customConfig,
+    '../utils/dirs': { appConfigPath: () => '/managed/config' },
+    '../utils/yaml': { parseYaml: JSON.parse, stringifyYaml: JSON.stringify },
+    '../utils/merge': { deepMerge },
+    '../utils/template': { defaultConfig: config },
+    '../resolve/webhook': { notifyConfigOperation: () => {} },
+    fs: { existsSync: () => false },
+    'fs/promises': {
+      readFile: async () => JSON.stringify(config),
+      writeFile: async (_file: string, data: string) => {
+        events.push('save')
+        Object.assign(config, JSON.parse(data))
+      }
+    }
+  })
+  const ready = appConfig.getAppConfig()
+  const ipc = load<{ registerIpcMainHandlers: () => void }>('../utils/ipc.ts', {
+    '../resolve/webhook': { webhookOperationCategories: new Map() },
+    electron: {
+      ipcMain: {
+        handle: (name: string, fn: (...args: unknown[]) => Promise<unknown>) =>
+          handlers.set(name, fn)
+      }
+    },
+    '../config': appConfig
+  })
   ipc.registerIpcMainHandlers()
   return {
     events,
     config,
-    patch: (patch: Partial<AppConfig>) => handlers.get('patchAppConfig')!(null, patch)
+    patch: async (patch: Partial<AppConfig>) => {
+      await ready
+      return handlers.get('patchAppConfig')!(null, patch)
+    },
+    directPatch: async (patch: Partial<AppConfig>) => {
+      await ready
+      return appConfig.patchAppConfig(patch)
+    }
   }
 }
 
@@ -201,13 +223,28 @@ test('IPC authorizes the imported copy before changing config or DNS', async () 
   assert.equal(fixture.config.systemCorePath, '/managed/local-one/mihomo')
 })
 
+test('direct app config writes share the same import and DNS guard as IPC', async () => {
+  const fixture = ipcFixture({ core: 'mihomo' })
+  await fixture.directPatch({ core: 'system', systemCorePath: '/source/custom' })
+  assert.deepEqual(fixture.events, [
+    'import:/source/custom',
+    'grant:/managed/local-one/mihomo',
+    'dns-prepare',
+    'save'
+  ])
+})
+
 test('cancelling import authorization preserves the current core/config and DNS', async () => {
   const fixture = ipcFixture({ core: 'mihomo', systemCorePath: '/previous/core' }, true)
   const result = (await fixture.patch({ core: 'system', systemCorePath: '/source/custom' })) as {
     invokeError: string
   }
   assert.equal(result.invokeError, '用户取消操作')
-  assert.deepEqual(fixture.config, { core: 'mihomo', systemCorePath: '/previous/core' })
+  assert.deepEqual(fixture.config, {
+    sysProxy: { enable: false },
+    core: 'mihomo',
+    systemCorePath: '/previous/core'
+  })
   assert.deepEqual(fixture.events, ['import:/source/custom', 'grant:/managed/local-one/mihomo'])
 })
 
@@ -266,7 +303,7 @@ function managerFixture(
     mihomoIpcPath: () => '/unused/socket'
   }
   const chain = load('./startup-chain.ts', { '../utils/dirs': dirs })
-  const manager = load<typeof import('./manager')>('./manager.ts', {
+  const mocks: Record<string, unknown> = {
     '../resolve/webhook': { notifyCoreStarted: noop, notifyCoreStopped: noop, emitWebhook: noop },
     child_process: {
       spawn: (file: string) => {
@@ -353,7 +390,16 @@ function managerFixture(
         ensureStreamsStarted: async () => {}
       })
     }
+  }
+  mocks['../custom/core-lifecycle'] = load('../custom/core-lifecycle.ts', {
+    ...mocks,
+    './paths': { localCoreDir: dirs.localCoreDir },
+    '../core/factory': mocks['./factory'],
+    '../core/local-core': mocks['./local-core'],
+    '../core/mihomoApi': mocks['./mihomoApi'],
+    '../core/startup-chain': chain
   })
+  const manager = load<typeof import('./manager')>('./manager.ts', mocks)
   return { ...manager, child, events, runtime, config, postUp }
 }
 

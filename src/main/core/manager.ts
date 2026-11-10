@@ -1,18 +1,23 @@
 import { ChildProcess, spawn } from 'child_process'
-import { dataDir, coreLogPath, localCoreDir, mihomoCorePath } from '../utils/dirs'
-import { ensureLocalCorePermission, importLocalCore } from './local-core'
 import { createInterface } from 'readline'
+import { dataDir, coreLogPath, mihomoCorePath } from '../utils/dirs'
 import { systemCoreOnlyBuild } from '../../shared/build-flags'
 import { generateProfile, getRuntimeConfig } from './factory'
-import { getAppConfig, getControledMihomoConfig, getProfileConfig, patchAppConfig } from '../config'
-import { app } from 'electron'
+import {
+  getAppConfig,
+  getControledMihomoConfig,
+  getProfileConfig,
+  patchAppConfig,
+  patchControledMihomoConfig
+} from '../config'
+import { app, ipcMain } from 'electron'
+import { createCustomCoreLifecycle } from '../custom/core-lifecycle'
 import {
   startMihomoTraffic,
   startMihomoConnections,
   startMihomoLogs,
   startMihomoMemory,
   patchMihomoConfig,
-  mihomoConfig,
   mihomoGroups,
   getAxios
 } from './mihomoApi'
@@ -43,13 +48,6 @@ import {
 import { createCoreHookWaiter, createCoreStartupHook } from './startupHook'
 import { stopChildProcess } from './process-control'
 import { recoverDNS, setPublicDNS, startNetworkDetectionController } from './network'
-import {
-  acquireMihomoSystemDNSLease,
-  hasMihomoDnsListener,
-  reconcileMihomoSystemDNSLease,
-  releaseMihomoSystemDNSLease,
-  shouldManageMihomoSystemDns
-} from '../sys/mihomo-system-dns'
 import { checkProfile } from './profile-check'
 import {
   createCoreEnvironment,
@@ -57,6 +55,7 @@ import {
   createProviderInitializationTracker,
   isControllerListenError,
   isControllerReadyLog,
+  isTunPermissionError,
   isUpdaterFinishedLog
 } from './startup-chain'
 import { createServiceCoreRuntime } from './service-core-runtime'
@@ -66,6 +65,8 @@ import {
   notifyCoreStarted,
   notifyCoreStopped
 } from '../resolve/webhook'
+
+const customCore = createCustomCoreLifecycle(stopCore)
 
 const ctlParam = process.platform === 'win32' ? '-ext-ctl-pipe' : '-ext-ctl-unix'
 
@@ -221,23 +222,11 @@ async function startMihomoApiStreams(): Promise<void> {
   directCoreState.retry = 10
 }
 
-async function ensureTunStarted(): Promise<void> {
-  if (!(await getRuntimeConfig()).tun?.enable) return
-  try {
-    if (!(await mihomoConfig()).tun?.enable) {
-      throw new Error('虚拟网卡启动失败，请检查内核权限和 TUN 日志；未修改系统 DNS')
-    }
-  } catch (error) {
-    // Restore DNS before stopping the failed core; preserve the user's TUN setting.
-    await stopCore()
-    throw error
-  }
-}
-
 async function completeCoreInitialization(
   logLevel?: LogLevel,
   child?: ChildProcess
 ): Promise<void> {
+  await customCore.onReady()
   if (
     child?.pid &&
     child === directCoreState.child &&
@@ -268,10 +257,6 @@ async function completeCoreInitialization(
   if (logLevel) {
     tasks.push(delay(100).then(() => patchMihomoConfig({ 'log-level': logLevel })))
   }
-
-  // The core is fully ready at this point. The local macOS helper verifies
-  // that dns.listen is accepting connections before changing the resolver.
-  tasks.push(acquireMihomoSystemDNSLease())
 
   await Promise.all(tasks)
   setMihomoLogSource('ws')
@@ -384,13 +369,6 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
   const { current } = profileConfig
   const useServiceCore = corePermissionMode === 'service' && !detached
 
-  // Reconcile any helper transaction left by a crash before touching the
-  // Mihomo process. Installation is socket-idempotent and only prompts when
-  // launchd genuinely needs to be installed or repaired.
-  if (process.platform === 'darwin') {
-    await reconcileMihomoSystemDNSLease()
-  }
-
   let corePath: string
   try {
     corePath = mihomoCorePath(core)
@@ -402,19 +380,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     throw error
   }
 
-  if (core === 'system') {
-    const importedPath = await importLocalCore(corePath, localCoreDir())
-    if (!useServiceCore) await ensureLocalCorePermission(importedPath)
-    if (importedPath !== corePath) {
-      await patchAppConfig({ systemCorePath: importedPath })
-      corePath = importedPath
-    }
-  }
-
-  if (appConfig.customMihomo?.path === corePath && !useServiceCore) {
-    await ensureLocalCorePermission(corePath)
-  }
-
+  corePath = await customCore.prepareStart(appConfig, corePath, useServiceCore)
   await generateProfile()
   if (useServiceCore || detached) {
     await checkProfile()
@@ -438,7 +404,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     await stopCore()
   }
   setMihomoLogSource('out')
-  if (tun?.enable && autoSetDNSMode !== 'none' && !hasMihomoDnsListener(controlledMihomoConfig)) {
+  if (tun?.enable && customCore.allowPublicDNS(autoSetDNSMode, controlledMihomoConfig)) {
     try {
       await setPublicDNS()
     } catch (error) {
@@ -478,7 +444,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     const serviceProfile: ServiceCoreLaunchProfile = {
       core_path: corePath,
       skip_hardening:
-        systemCoreOnlyBuild || core === 'system' || appConfig.customMihomo?.path === corePath,
+        systemCoreOnlyBuild || core === 'system' || customCore.isManagedCore(appConfig, corePath),
       args: spawnArgs,
       mode: serviceRunMode,
       safe_paths: safePaths,
@@ -518,9 +484,8 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
       serviceCoreRuntime.endStartup()
     }
     await serviceCoreRuntime.ensureStreamsStarted()
-    await ensureTunStarted()
     initialized = true
-    return [completeCoreInitialization(logLevel)]
+    return customCore.completeStartup([completeCoreInitialization(logLevel)])
   }
 
   const providerTracker = createProviderInitializationTracker(await getRuntimeConfig())
@@ -640,11 +605,18 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
           providersReady ||= providerTracker.isReady(line)
           controllerReady ||= isControllerReadyLog(line)
 
+          if (isTunPermissionError(line) && !customCore.preserveTunSettings) {
+            patchControledMihomoConfig({ tun: { enable: false } })
+            mainWindow?.webContents.send('controledMihomoConfigUpdated')
+            ipcMain.emit('updateTrayMenu')
+            reject('虚拟网卡启动失败，前往内核设置页尝试手动授予内核权限')
+            return
+          }
+
           if (!controllerReady || !providersReady || completing) return
           completing = true
           await startMihomoApiStreams()
           await waitForMihomoReady()
-          await ensureTunStarted()
           initialized = true
           resolve([completeCoreInitialization(logLevel, child)])
         }
@@ -663,7 +635,6 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
 
       hookWaiter.promise
         .then(async () => {
-          await ensureTunStarted()
           initialized = true
           await startMihomoApiStreams()
           resolve([completeCoreInitialization(logLevel, child)])
@@ -672,28 +643,14 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     })
   }
 
-  const promises = await (coreStartupMode === 'post-up'
-    ? waitForCoreReadyByHook()
-    : waitForCoreReadyByLog())
-  await Promise.all(promises)
-  return promises
+  return customCore.completeStartup(
+    coreStartupMode === 'post-up' ? waitForCoreReadyByHook() : waitForCoreReadyByLog()
+  )
 }
 
 export async function stopCore(force = false): Promise<void> {
   serviceCoreRuntime.pauseAutoResume()
-
-  try {
-    // Restore the resolver before any stop path tears down dns.listen.
-    await releaseMihomoSystemDNSLease()
-  } catch (error) {
-    await appendAppLog(`[Manager]: restore macOS system DNS failed, ${error}\n`)
-    void showNotification({
-      title: '系统 DNS 恢复失败，内核保持运行',
-      body: `${error}`,
-      variant: 'danger'
-    })
-    throw error
-  }
+  await customCore.beforeStop()
 
   try {
     if (!force) {
@@ -838,30 +795,12 @@ export async function restartCore(): Promise<void> {
 
 export async function keepCoreAlive(): Promise<void> {
   try {
-    const [appConfig, controlledConfig] = await Promise.all([
-      getAppConfig(),
-      getControledMihomoConfig()
-    ])
-    const { corePermissionMode = 'elevated', webhook } = appConfig
+    const { corePermissionMode = 'elevated', webhook } = await getAppConfig()
     if (corePermissionMode === 'service') {
       return
     }
 
-    // The running core already owns the configured listener. Keep
-    // it (and its resolver lease) alive when the UI enters lightweight mode;
-    // restarting a detached core here would otherwise release the lease before
-    // the detached startup path can validate and reacquire it.
-    if (
-      process.platform === 'darwin' &&
-      shouldManageMihomoSystemDns(appConfig.controlDns !== false, controlledConfig) &&
-      directCoreState.child
-    ) {
-      if (directCoreState.child.pid) {
-        await writeFile(path.join(dataDir(), 'core.pid'), directCoreState.child.pid.toString())
-      }
-      return
-    }
-
+    if (await customCore.keepRunning(directCoreState.child)) return
     await startCore(true)
     if (directCoreState.child?.pid) {
       await writeFile(path.join(dataDir(), 'core.pid'), directCoreState.child.pid.toString())
