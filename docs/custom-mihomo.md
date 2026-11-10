@@ -1,8 +1,8 @@
 # 自定义 Mihomo
 
-`custom` 分支基于 Sparkle 上游稳定版 `1.26.10`，当前应用版本为 `1.26.10-custom.2`。
+`custom` 分支自动跟随 Sparkle 上游正式版，应用版本格式为 `上游版本-custom.修订号`。
 内置内核及在线更新均使用 [SeventyfourSam/mihomo 的正式 Release](https://github.com/SeventyfourSam/mihomo/releases/latest)。
-当前提供 Windows x64 和 macOS arm64，首次接入的版本为 `v1.19.33-custom.2`。
+当前提供 Windows x64 和 macOS arm64，内置带有 `/upgrade` 自更新适配的 Mihomo 正式版。
 构建及更新按 Release 中的实际文件名下载，并验证 `SHA256SUMS`；不回退到官方内核。
 
 ## UDP 规则回退
@@ -54,10 +54,25 @@ hooks:
 
 ## 内核更新
 
-「内核设置」中的下载按钮检查自定义正式 Release。旧的内置预览版选择自动迁移为内置自定义版。
-更新先完成下载、校验和可执行文件检查，再切换内核；启动或版本校验失败会恢复原内核。
-更新文件保存在应用数据目录，不修改安装目录，后续应用包带有更新内核时优先使用较新版本。
-通过「导入本地内核」选择的内核仍由用户重新导入更新。
+「内核设置」中的下载按钮沿用原版调用方式：向运行中的 Mihomo 发送 `POST /upgrade?channel=release`。
+Mihomo 自行从 `SeventyfourSam/mihomo` 下载、替换并重启。Sparkle 不再另行下载内核或维护更新副本。
+旧的内置预览版选择自动迁移为内置内核，手动导入功能保留。
+
+## Sparkle 更新与自动发布
+
+应用更新清单、安装包和下载链接统一来自 `SeventyfourSam/sparkle`。
+版本比较保留完整的 `-custom.N` 后缀，因此同一上游版本的不同修订也能正常发现和安装更新。
+保留原版的自动检查开关、下载校验和安装流程；旧的滚动通道设置迁移为正式版。
+
+`Custom Release` 每天 09:37（Asia/Singapore）检查上游最新正式 Release：
+
+1. 有新正式版时合并到 `custom`。合并前将 `package.json` 的版本暂时对齐基础版本，避免版本后缀造成冲突。
+2. 检查类型、运行回归测试，再推送合并结果和新的 `-custom.N` 版本。
+3. 固定同一个 Mihomo Release，构建 Windows x64 和 macOS arm64。
+4. 两个平台全部成功后，发布正式 Release、`latest.yml` 和 SHA-256 清单。
+
+已成功发布的上游版本不重复构建；构建或发布失败时，下次每日任务会重试未发布版本。
+合并冲突或测试失败时停止，不推送失败的合并。手动运行该工作流可以发布当前改动的新修订。
 
 ## 编译打包
 
@@ -72,6 +87,6 @@ pnpm build:win --x64
 macOS arm64 在对应平台运行 `pnpm build:mac --arm64`。
 `prepare` 会准备自定义内核及原有资源，首次安装需联网。
 输出在 `dist`；Windows 便携包需在归档根目录加入空文件 `PORTABLE`。
-GitHub Actions 的 `Custom Build` 工作流可手动构建上述两个平台，并上传构建产物，不自动发布 Release。
+GitHub Actions 的 `Custom Release` 工作流会构建上述两个平台并发布更新，可用 `gh workflow run custom-release.yml --ref custom` 手动运行。
 
 定制代码的目录和上游接入点见 [定制模块维护说明](customization.md)。

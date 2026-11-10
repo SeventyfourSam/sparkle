@@ -3,6 +3,7 @@ import { gunzipSync } from 'node:zlib'
 import AdmZip from 'adm-zip'
 
 export const MIHOMO_REPOSITORY = 'SeventyfourSam/mihomo'
+
 export const MIHOMO_RELEASE_API = `https://api.github.com/repos/${MIHOMO_REPOSITORY}/releases/latest`
 const VERSION_PATTERN = /^v(\d+)\.(\d+)\.(\d+)-custom\.(\d+)$/
 const ASSETS: Readonly<Partial<Record<string, string>>> = {
@@ -69,13 +70,16 @@ export function selectMihomoRelease(data: unknown, platform: string, arch: strin
 export async function getMihomoRelease(
   platform = process.platform,
   arch: string = process.arch,
-  request: ReleaseRequest = requestReleaseFile
+  request: ReleaseRequest = requestReleaseFile,
+  version?: string
 ): Promise<MihomoRelease> {
-  return selectMihomoRelease(
-    JSON.parse((await request(MIHOMO_RELEASE_API)).toString()),
-    platform,
-    arch
-  )
+  if (version && !VERSION_PATTERN.test(version)) throw new Error('Invalid Mihomo release version')
+  const url = version
+    ? `https://api.github.com/repos/${MIHOMO_REPOSITORY}/releases/tags/${version}`
+    : MIHOMO_RELEASE_API
+  const release = selectMihomoRelease(JSON.parse((await request(url)).toString()), platform, arch)
+  if (version && release.version !== version) throw new Error('Mihomo release version mismatch')
+  return release
 }
 
 export function verifyMihomoChecksum(data: Buffer, sums: string, assetName: string): void {
@@ -106,16 +110,4 @@ export async function downloadMihomoRelease(
     return entry.getData()
   }
   return gunzipSync(archive)
-}
-
-/** Compare only our version format; an unknown installed version is older. */
-export function compareMihomoVersions(installed: string, bundled: string): number {
-  const a = VERSION_PATTERN.exec(installed)?.slice(1).map(Number)
-  const b = VERSION_PATTERN.exec(bundled)?.slice(1).map(Number)
-  if (!a) return -1
-  if (!b) return 1
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return a[i] > b[i] ? 1 : -1
-  }
-  return 0
 }

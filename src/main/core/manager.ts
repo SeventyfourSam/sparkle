@@ -443,8 +443,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
   if (useServiceCore) {
     const serviceProfile: ServiceCoreLaunchProfile = {
       core_path: corePath,
-      skip_hardening:
-        systemCoreOnlyBuild || core === 'system' || customCore.isManagedCore(appConfig, corePath),
+      skip_hardening: systemCoreOnlyBuild || core === 'system',
       args: spawnArgs,
       mode: serviceRunMode,
       safe_paths: safePaths,

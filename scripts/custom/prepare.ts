@@ -10,7 +10,12 @@ interface PrepareTask {
 }
 
 export async function prepareCustomMihomo(arch: string): Promise<void> {
-  const release = await getMihomoRelease(process.platform, arch)
+  const release = await getMihomoRelease(
+    process.platform,
+    arch,
+    undefined,
+    process.env.MIHOMO_RELEASE_VERSION
+  )
   console.log(`Custom Mihomo release: ${release.version}`)
   const executable = await downloadMihomoRelease(release)
   const sidecarDir = path.join(process.cwd(), 'extra', 'sidecar')

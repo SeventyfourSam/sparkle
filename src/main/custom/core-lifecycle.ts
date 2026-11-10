@@ -31,18 +31,11 @@ export function createCustomCoreLifecycle(stopCore: () => Promise<void>) {
         if (imported !== corePath) await patchAppConfig({ systemCorePath: imported })
         return imported
       }
-      if (config.customMihomo?.path === corePath && !useService) {
-        await ensureLocalCorePermission(corePath)
-      }
       return corePath
     },
 
     allowPublicDNS(mode: AppConfig['autoSetDNSMode'], config: Partial<MihomoConfig>): boolean {
       return mode !== 'none' && !hasMihomoDnsListener(config)
-    },
-
-    isManagedCore(config: AppConfig, corePath: string): boolean {
-      return config.customMihomo?.path === corePath
     },
 
     async onReady(): Promise<void> {

@@ -1,0 +1,205 @@
+name: Custom Release
+
+on:
+  schedule:
+    - cron: '37 1 * * *' # 09:37 Asia/Singapore, once per day
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/custom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.commit.outputs.sha }}
+      upstream: ${{ steps.sync.outputs.upstream }}
+      mihomo: ${{ steps.core.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: custom
+          fetch-depth: 0
+          ssh-key: ${{ secrets.CUSTOM_UPSTREAM_SSH_KEY }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Merge latest upstream stable release
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          upstream=$(gh api repos/xishang0128/sparkle/releases/latest --jq '.tag_name')
+          [[ "$upstream" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "upstream=${upstream#v}" >> "$GITHUB_OUTPUT"
+          git fetch --no-tags https://github.com/xishang0128/sparkle.git "refs/tags/$upstream:refs/tags/upstream/$upstream"
+          changed=false
+          if ! git merge-base --is-ancestor "upstream/$upstream" HEAD; then
+            node scripts/custom/release.ts normalize
+            if ! git diff --quiet -- package.json; then
+              git add package.json
+              git commit -m 'chore: align package version before upstream merge'
+            fi
+            git merge --no-edit "upstream/$upstream"
+            changed=true
+          fi
+          reuse=false
+          if [[ "$GITHUB_EVENT_NAME" == schedule && "$changed" == false ]]; then
+            current=$(node -p 'JSON.parse(require("fs").readFileSync("package.json","utf8")).version')
+            draft=$(gh release view "v$current" --json isDraft --jq .isDraft 2>/dev/null || true)
+            if [[ "$draft" == false ]]; then
+              echo 'Upstream stable release is already published.'
+              echo 'build=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            reuse=true
+            if git rev-parse -q --verify "refs/tags/v$current" >/dev/null; then
+              [[ $(git rev-list -n 1 "v$current") == $(git rev-parse HEAD) ]] || reuse=false
+            fi
+          fi
+          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
+          echo 'build=true' >> "$GITHUB_OUTPUT"
+      - name: Determine release version
+        if: steps.sync.outputs.build == 'true'
+        id: version
+        env:
+          UPSTREAM_VERSION: ${{ steps.sync.outputs.upstream }}
+          REUSE_VERSION: ${{ steps.sync.outputs.reuse }}
+        run: node scripts/custom/release.ts version
+      - name: Pin bundled Mihomo release
+        if: steps.sync.outputs.build == 'true'
+        id: core
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(gh api repos/SeventyfourSam/mihomo/releases/latest --jq '.tag_name')
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-custom\.[1-9][0-9]*$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install dependencies
+        if: steps.sync.outputs.build == 'true'
+        env:
+          SKIP_PREPARE: '1'
+        run: npm install -g pnpm@11.1.1 && pnpm install --frozen-lockfile
+      - name: Check source
+        if: steps.sync.outputs.build == 'true'
+        run: |
+          pnpm typecheck
+          pnpm test:custom
+      - name: Push tested source
+        if: steps.sync.outputs.build == 'true'
+        id: commit
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ! git diff --quiet -- package.json; then
+            git add package.json
+            git commit -m "chore: release $VERSION"
+          fi
+          git push origin HEAD:refs/heads/custom
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.commit != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            command: build:win
+          - os: macos-latest
+            arch: arm64
+            command: build:mac
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      MIHOMO_RELEASE_VERSION: ${{ needs.prepare.outputs.mihomo }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm install -g pnpm@11.1.1 && pnpm install --frozen-lockfile
+      - run: pnpm test:custom
+      - name: Verify macOS DNS helper
+        if: runner.os == 'macOS'
+        run: |
+          file extra/files/sparkle-dns-helper | grep -q 'Mach-O 64-bit executable arm64'
+          extra/files/sparkle-dns-helper self-test --json
+      - run: pnpm ${{ matrix.command }} --${{ matrix.arch }}
+      - name: Add portable flag
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -Path PORTABLE -ItemType File
+          Get-ChildItem dist/*portable.7z | ForEach-Object { 7z a $_.FullName PORTABLE }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: custom-packages-${{ runner.os }}
+          path: |
+            dist/sparkle*setup.exe
+            dist/sparkle*portable.7z
+            dist/sparkle*.pkg
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      UPSTREAM_VERSION: ${{ needs.prepare.outputs.upstream }}
+      MIHOMO_RELEASE_VERSION: ${{ needs.prepare.outputs.mihomo }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+          ssh-key: ${{ secrets.CUSTOM_UPSTREAM_SSH_KEY }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: custom-packages-*
+          merge-multiple: true
+          path: dist
+      - name: Generate update manifest and checksums
+        run: node scripts/custom/release.ts manifest
+      - name: Publish verified release
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            [[ $(git rev-list -n 1 "$TAG") == $(git rev-parse HEAD) ]]
+          else
+            git tag -a "$TAG" -m "Sparkle $VERSION"
+            git push origin "refs/tags/$TAG"
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --title "Sparkle $VERSION" --notes-file release-notes.md
+          fi
+          gh release upload "$TAG" dist/* latest.yml SHA256SUMS --clobber
+          gh release edit "$TAG" --draft=false --prerelease=false --latest --notes-file release-notes.md

@@ -1,11 +1,12 @@
 import yaml from 'yaml'
+import { appReleaseTag, SPARKLE_RELEASES } from '../src/shared/repositories.ts'
 import { readFileSync, writeFileSync } from 'fs'
 
 const pkg = readFileSync('package.json', 'utf-8')
 let changelog = readFileSync('changelog.md', 'utf-8')
 const { version } = JSON.parse(pkg)
-const tag = process.env.RELEASE_TAG || version
-const downloadUrl = `https://github.com/xishang0128/sparkle/releases/download/${tag}`
+const tag = appReleaseTag(version, process.env.RELEASE_TAG)
+const downloadUrl = `${SPARKLE_RELEASES}/download/${tag}`
 const latest = {
   version,
   tag,

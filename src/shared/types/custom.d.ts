@@ -1,8 +1,4 @@
 /** Declaration merging keeps custom Mihomo fields out of the upstream type files. */
-interface AppConfig {
-  customMihomo?: { path: string; version: string }
-}
-
 interface ControllerConfigs {
   'udp-fallback'?: boolean
 }

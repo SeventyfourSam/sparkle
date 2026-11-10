@@ -19,13 +19,18 @@ import {
 } from '../service/fallback'
 import { appendAppLog } from '../utils/log'
 import { systemCoreOnlyBuild } from '../../shared/build-flags'
-import { isCustomBuild, upstreamAppVersion } from '../../shared/custom-build'
+import {
+  appReleaseTag,
+  SPARKLE_RELEASES,
+  SPARKLE_RELEASE_API,
+  SPARKLE_UPDATE_URL
+} from '../../shared/repositories'
 
 let downloadCancelToken: CancelTokenSource | null = null
 const WINDOWS_INSTALLER_MIN_TEMP_SPACE_BYTES = 1024 * 1024 * 1024
 const UPDATE_MANIFEST_URLS: Record<AppUpdateChannel, string> = {
-  stable: 'https://github.com/xishang0128/sparkle/releases/latest/download/latest.yml',
-  rolling: 'https://github.com/xishang0128/sparkle/releases/download/rolling/latest.yml'
+  stable: SPARKLE_UPDATE_URL,
+  rolling: SPARKLE_UPDATE_URL
 }
 
 function getGitHubAuthHeaders(token?: string): Record<string, string> {
@@ -34,9 +39,7 @@ function getGitHubAuthHeaders(token?: string): Record<string, string> {
 }
 
 function resolveReleaseTag(version: string, tag?: string): string {
-  if (tag) return tag
-  if (version.includes('-rolling-')) return 'rolling'
-  return version
+  return appReleaseTag(version, tag)
 }
 
 async function ensureFreeSpace(dir: string, requiredBytes: number, message: string): Promise<void> {
@@ -68,8 +71,8 @@ export async function checkUpdate(): Promise<AppVersion | undefined> {
     responseType: 'text'
   })
   const latest = parseYaml<AppVersion>(res.data)
-  const currentVersion = upstreamAppVersion(app.getVersion())
-  if (upstreamAppVersion(latest.version) !== currentVersion) {
+  const currentVersion = app.getVersion()
+  if (latest.version !== currentVersion) {
     return latest
   } else {
     return undefined
@@ -100,8 +103,6 @@ async function ensureWindowsInstallerTempSpace(): Promise<void> {
 }
 
 export async function downloadAndInstallUpdate(version: string, tag?: string): Promise<void> {
-  if (isCustomBuild(app.getVersion())) return
-
   let appUpdateInstalling = false
   let sysProxyPaused = false
   const pauseSysProxy = async (): Promise<void> => {
@@ -121,7 +122,7 @@ export async function downloadAndInstallUpdate(version: string, tag?: string): P
   const { 'mixed-port': mixedPort = 7890 } = await getControledMihomoConfig()
   const { githubToken } = await getAppConfig()
   const releaseTag = resolveReleaseTag(version, tag)
-  const baseUrl = `https://github.com/xishang0128/sparkle/releases/download/${releaseTag}/`
+  const baseUrl = `${SPARKLE_RELEASES}/download/${releaseTag}/`
   const fileMap: Record<string, string> = {
     'win32-x64': `sparkle-windows-${version}-x64-setup.exe`,
     'win32-arm64': `sparkle-windows-${version}-arm64-setup.exe`,
@@ -137,7 +138,7 @@ export async function downloadAndInstallUpdate(version: string, tag?: string): P
   }
   downloadCancelToken = axios.CancelToken.source()
 
-  const apiUrl = `https://api.github.com/repos/xishang0128/sparkle/releases/tags/${releaseTag}`
+  const apiUrl = `${SPARKLE_RELEASE_API}/tags/${releaseTag}`
   const apiRequestConfig: AxiosRequestConfig = {
     headers: {
       Accept: 'application/vnd.github.v3+json',

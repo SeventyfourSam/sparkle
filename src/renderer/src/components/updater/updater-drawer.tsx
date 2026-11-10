@@ -5,7 +5,7 @@ import { downloadAndInstallUpdate } from '@renderer/utils/ipc'
 import { platform } from '@renderer/utils/init'
 import { notify } from '@renderer/utils/notification'
 import { FiX, FiDownload } from 'react-icons/fi'
-import { allowOfficialAppUpdates } from '@renderer/custom/policy'
+import { appReleaseTag, SPARKLE_RELEASES } from '../../../../shared/repositories'
 
 interface Props {
   version: string
@@ -82,9 +82,9 @@ const UpdaterDrawer: React.FC<Props> = (props) => {
   }
 
   const isDownloading = updateStatus?.downloading || downloading
-  const releaseTag = tag ?? (version.includes('-rolling-') ? 'rolling' : version)
-  const releaseUrl = `https://github.com/xishang0128/sparkle/releases/tag/${releaseTag}`
-  const releaseLink = !isDownloading && allowOfficialAppUpdates() && (
+  const releaseTag = appReleaseTag(version, tag)
+  const releaseUrl = `${SPARKLE_RELEASES}/tag/${releaseTag}`
+  const releaseLink = !isDownloading && (
     <Link
       className={
         isLinux
@@ -193,7 +193,7 @@ const UpdaterDrawer: React.FC<Props> = (props) => {
                     '取消'
                   )}
                 </Button>
-                {!updateStatus?.downloading && allowOfficialAppUpdates() && (
+                {!updateStatus?.downloading && (
                   <Button
                     size="sm"
                     className="h-8 min-w-0 px-3 text-sm leading-none"

@@ -4,7 +4,6 @@ import { gzipSync } from 'node:zlib'
 import test from 'node:test'
 import AdmZip from 'adm-zip'
 import {
-  compareMihomoVersions,
   downloadMihomoRelease,
   getMihomoRelease,
   MIHOMO_RELEASE_API,
@@ -102,9 +101,18 @@ test('fails closed on checksum mismatch, missing checksum or unexpected zip entr
   )
 })
 
-test('prefers the newest bundled or downloaded custom version using numeric comparison', () => {
-  assert.equal(compareMihomoVersions('v1.19.33-custom.10', version), 1)
-  assert.equal(compareMihomoVersions(version, 'v1.19.34-custom.1'), -1)
-  assert.equal(compareMihomoVersions(version, version), 0)
-  assert.equal(compareMihomoVersions('invalid', version), -1)
+test('can pin the bundled core to one release for all build platforms', async () => {
+  const release = await getMihomoRelease(
+    'win32',
+    'x64',
+    async (url) => {
+      assert.equal(
+        url,
+        `https://api.github.com/repos/SeventyfourSam/mihomo/releases/tags/${version}`
+      )
+      return Buffer.from(JSON.stringify(metadata))
+    },
+    version
+  )
+  assert.equal(release.version, version)
 })

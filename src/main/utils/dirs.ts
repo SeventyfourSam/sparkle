@@ -5,7 +5,6 @@ import path from 'path'
 import { execSync } from 'child_process'
 import { getAppConfigSync } from '../config/app'
 import { checkCorePermissionPathSync } from '../core/permission-check'
-import { resolveCustomCorePath } from '../custom/paths'
 import {
   systemCoreDefaultPath,
   systemCoreOnlyBuild,
@@ -109,7 +108,7 @@ export function mihomoCoreDir(): string {
 export function mihomoCorePath(core: string): string {
   if (core === 'mihomo' || core === 'mihomo-alpha') {
     const isWin = process.platform === 'win32'
-    return resolveCustomCorePath(path.join(mihomoCoreDir(), `${core}${isWin ? '.exe' : ''}`))
+    return path.join(mihomoCoreDir(), `${core}${isWin ? '.exe' : ''}`)
   }
   if (core === 'system') {
     const sysPath = systemCorePath()

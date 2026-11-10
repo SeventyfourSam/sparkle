@@ -1,3 +1,4 @@
+import { releaseChannelOptions } from '@renderer/custom/update-channel'
 import { Button, Tooltip, Switch, Tabs } from '@heroui/react'
 
 import React, { useState } from 'react'
@@ -122,16 +123,7 @@ const GeneralConfig: React.FC = () => {
             data-full-width={false}
           >
             <Tabs.ListContainer>
-              <Tabs.List aria-label="选项">
-                <Tabs.Tab key="stable" id="stable">
-                  正式版
-                  <Tabs.Indicator />
-                </Tabs.Tab>
-                <Tabs.Tab key="rolling" id="rolling">
-                  滚动版
-                  <Tabs.Indicator />
-                </Tabs.Tab>
-              </Tabs.List>
+              <Tabs.List aria-label="选项">{releaseChannelOptions()}</Tabs.List>
             </Tabs.ListContainer>
           </Tabs>
         </SettingItem>

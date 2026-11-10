@@ -6,7 +6,11 @@ import { prepareMihomoSystemDnsAppPatch } from '../sys/mihomo-system-dns'
 import { localCoreDir } from './paths'
 
 export function customizeAppConfig(config: AppConfig): AppConfig {
-  return config.core === 'mihomo-alpha' ? { ...config, core: 'mihomo' } : config
+  return {
+    ...config,
+    core: config.core === 'mihomo-alpha' ? 'mihomo' : config.core,
+    updateChannel: 'stable'
+  }
 }
 
 /** Validate and authorize before any caller can persist a new core or release DNS. */

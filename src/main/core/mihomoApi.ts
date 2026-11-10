@@ -309,9 +309,11 @@ export const mihomoRulesDisable = async (rules: Record<string, boolean>): Promis
 }
 
 export const mihomoUpgrade = async (channel: string): Promise<void> => {
-  if (channel !== 'release' && channel !== 'alpha') throw new Error('未知内核更新渠道')
-  const { upgradeCustomMihomo } = await import('./custom-updater')
-  return upgradeCustomMihomo()
+  if (process.platform === 'win32') await patchMihomoConfig({ 'log-level': 'info' })
+  const instance = await getAxios()
+  return await instance.post(`/upgrade?channel=${encodeURIComponent(channel)}`, undefined, {
+    timeout: 90000
+  })
 }
 
 export const mihomoUpgradeGeo = async (): Promise<void> => {

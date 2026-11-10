@@ -51,8 +51,8 @@ export function useCustomCoreSettings(systemPaths: string[]) {
 
 export function customCoreOptions() {
   return [
-    <ListBox.Item key="mihomo" id="mihomo" textValue="内置自定义版">
-      内置自定义版
+    <ListBox.Item key="mihomo" id="mihomo" textValue="内置内核">
+      内置内核
       <ListBox.ItemIndicator />
     </ListBox.Item>,
     <ListBox.Item key="system" id="system" textValue="系统 / 本地内核">
