@@ -267,8 +267,15 @@ function createServiceAPIError(error: unknown): unknown {
 
 function handleServiceAxiosError(error: unknown): Promise<never> {
   const serviceError = createServiceAPIError(error)
+  const gatewayConflict =
+    axios.isAxiosError(error) &&
+    error.response?.status === 409 &&
+    /^\/lantern(?:\/|$)/.test(error.config?.url || '')
 
-  if (isServiceUnavailableError(error) || isServiceUnavailableError(serviceError)) {
+  if (
+    !gatewayConflict &&
+    (isServiceUnavailableError(error) || isServiceUnavailableError(serviceError))
+  ) {
     scheduleServiceUnavailableFallback(serviceError)
   }
 
@@ -376,9 +383,11 @@ export const getCoreStatus = async (): Promise<Record<string, unknown>> => {
 
 export interface ServiceCoreLaunchProfile {
   core_path?: string
+  skip_hardening?: boolean
   args?: string[]
   mode?: 'auto' | 'sandbox' | 'direct'
   safe_paths?: string[]
+  cpu_affinity?: number[]
   env?: Record<string, string | undefined>
   mihomo_cpu_priority?: Priority
   log_path?: string
@@ -732,6 +741,55 @@ export const patchCoreProfile = async (
 ): Promise<Record<string, unknown>> => {
   const instance = getServiceAxios()
   return await instance.patch('/core/profile', profile)
+}
+
+async function requestLantern<T>(
+  method: 'get' | 'post' | 'put',
+  path = '',
+  data?: unknown
+): Promise<T> {
+  try {
+    return (await getServiceAxios().request({ method, url: `/lantern${path}`, data })) as T
+  } catch (error) {
+    if (getServiceErrorStatus(error) === 404) {
+      throw new ServiceAPIError('当前服务版本不支持网关模式，请更新 sparkle-service 后重试', {
+        status: 404
+      })
+    }
+    throw error
+  }
+}
+
+export const getLanternStatus = async (): Promise<LanternSnapshot> => {
+  return await requestLantern('get')
+}
+
+export const getLanternInterfaces = async (): Promise<LanternNetwork> => {
+  return await requestLantern('get', '/interfaces')
+}
+
+export const startLantern = async (options: LanternOptions): Promise<LanternSnapshot> => {
+  return await requestLantern('post', '/start', options)
+}
+
+export const stopLantern = async (): Promise<LanternSnapshot> => {
+  return await requestLantern('post', '/stop')
+}
+
+export const configureLantern = async (options: LanternOptions): Promise<LanternSnapshot> => {
+  return await requestLantern('put', '/config', options)
+}
+
+export const probeLanternDHCP = async (name: string): Promise<LanternProbe> => {
+  return await requestLantern('post', '/probe', { interface: name })
+}
+
+export const resumeLanternDHCP = async (): Promise<LanternSnapshot> => {
+  return await requestLantern('post', '/dhcp/resume')
+}
+
+export const setLanternGatewayDevices = async (macs: string[]): Promise<LanternSnapshot> => {
+  return await requestLantern('put', '/dhcp/gateway-devices', macs)
 }
 
 export const getProxyStatus = async (): Promise<Record<string, unknown>> => {

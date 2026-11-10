@@ -18,6 +18,7 @@ import {
   pauseServiceFallbackForAppUpdate
 } from '../service/fallback'
 import { appendAppLog } from '../utils/log'
+import { systemCoreOnlyBuild } from '../../shared/build-flags'
 
 let downloadCancelToken: CancelTokenSource | null = null
 const CUSTOM_VERSION_SUFFIX = /-custom(?:\.[0-9A-Za-z-]+)*$/i
@@ -222,7 +223,7 @@ export async function downloadAndInstallUpdate(version: string, tag?: string): P
       }).unref()
       appUpdateInstalling = true
     }
-    if (file.endsWith('.7z')) {
+    if (!systemCoreOnlyBuild && file.endsWith('.7z')) {
       await pauseSysProxy()
       await pauseServiceFallbackForAppUpdate()
       await stopServiceForPortableUpdate()

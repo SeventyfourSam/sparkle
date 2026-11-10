@@ -1,4 +1,5 @@
-import { Button, Select, SelectItem, Switch, Tab, Tabs } from '@heroui/react'
+import { Button, Spinner, Select, Switch, Tabs, ListBox } from '@heroui/react'
+
 import BasePage from '@renderer/components/base/base-page'
 import SettingCard from '@renderer/components/base/base-setting-card'
 import SettingItem from '@renderer/components/base/base-setting-item'
@@ -30,6 +31,7 @@ import EnvSetting from '@renderer/components/mihomo/env-setting'
 import AdvancedSetting from '@renderer/components/mihomo/advanced-settings'
 import LogSetting from '@renderer/components/mihomo/log-setting'
 import { notify } from '@renderer/utils/notification'
+import { systemCoreOnlyBuild } from '../../../shared/build-flags'
 
 let systemCorePathsCache: string[] | null = null
 let cachePromise: Promise<string[]> | null = null
@@ -60,6 +62,7 @@ const Mihomo: React.FC = () => {
     core = 'mihomo',
     corePermissionMode = 'elevated',
     serviceRunMode = 'auto',
+    serviceCpuAffinity = [],
     coreStartupMode = 'post-up',
     mihomoCpuPriority = 'PRIORITY_NORMAL'
   } = appConfig || {}
@@ -153,7 +156,7 @@ const Mihomo: React.FC = () => {
 
   return (
     <BasePage title="内核设置" contentClassName="no-scrollbar">
-      {showPermissionModal && (
+      {!systemCoreOnlyBuild && showPermissionModal && (
         <PermissionModal
           onChange={setShowPermissionModal}
           onRevoke={async () => {
@@ -176,6 +179,12 @@ const Mihomo: React.FC = () => {
       {showServiceModal && (
         <ServiceModal
           onChange={setShowServiceModal}
+          serviceRunMode={serviceRunMode}
+          onRunModeChange={(mode) => handleConfigChangeWithRestart({ serviceRunMode: mode })}
+          serviceCpuAffinity={serviceCpuAffinity}
+          onCpuAffinityChange={async (value) => {
+            await patchAppConfig({ serviceCpuAffinity: value })
+          }}
           onInit={async () => {
             await initService()
             notify('服务初始化成功')
@@ -199,66 +208,113 @@ const Mihomo: React.FC = () => {
         />
       )}
       <SettingCard>
-        <SettingItem
-          compatKey="legacy"
-          title="内核版本"
-          actions={
-            core === 'mihomo' || core === 'mihomo-alpha' ? (
-              <Button
-                size="sm"
-                isIconOnly
-                variant="light"
-                isLoading={upgrading}
-                onPress={handleCoreUpgrade}
-              >
-                <IoMdCloudDownload className="text-lg" />
-              </Button>
-            ) : null
-          }
-          divider
-        >
-          <div className="flex items-center gap-2">
+        {systemCoreOnlyBuild ? null : (
+          <SettingItem
+            compatKey="legacy"
+            title="内核版本"
+            actions={
+              core === 'mihomo' || core === 'mihomo-alpha' ? (
+                <Button
+                  size="sm"
+                  isIconOnly
+                  onPress={handleCoreUpgrade}
+                  variant="ghost"
+                  data-color="default"
+                  isPending={upgrading}
+                  isDisabled={upgrading}
+                >
+                  {upgrading ? (
+                    <Spinner size="sm" color="current" />
+                  ) : (
+                    <IoMdCloudDownload className="text-lg" />
+                  )}
+                </Button>
+              ) : null
+            }
+            divider
+          >
             <Select
               aria-label="内核版本"
-              classNames={{ trigger: 'data-[hover=true]:bg-default-200' }}
-              className="w-37.5"
-              size="sm"
-              selectedKeys={new Set([core])}
-              disallowEmptySelection={true}
+              className={['w-37.5'].filter(Boolean).join(' ')}
+              data-size="sm"
+              value={core ?? null}
               isDisabled={changingCore}
-              onSelectionChange={(v) => handleCoreChange(v.currentKey as AppConfig['core'])}
+              onChange={(v) => handleCoreChange(v as AppConfig['core'])}
             >
-              <SelectItem key="mihomo">内置稳定版</SelectItem>
-              <SelectItem key="mihomo-alpha">内置预览版</SelectItem>
-              <SelectItem key="system">系统 / 本地内核</SelectItem>
+              <Select.Trigger className="data-[hover=true]:bg-default-200">
+                <Select.Value />
+                <Select.Indicator />
+              </Select.Trigger>
+              <Select.Popover placement="bottom" shouldFlip containerPadding={56}>
+                <ListBox>
+                  <ListBox.Item key="mihomo" id="mihomo" textValue="内置稳定版">
+                    内置稳定版
+                    <ListBox.ItemIndicator />
+                  </ListBox.Item>
+                  <ListBox.Item key="mihomo-alpha" id="mihomo-alpha" textValue="内置预览版">
+                    内置预览版
+                    <ListBox.ItemIndicator />
+                  </ListBox.Item>
+                  <ListBox.Item key="system" id="system" textValue="系统 / 本地内核">
+                    系统 / 本地内核
+                    <ListBox.ItemIndicator />
+                  </ListBox.Item>
+                </ListBox>
+              </Select.Popover>
             </Select>
-            <Button size="sm" isLoading={changingCore} onPress={handleLocalCoreSelect}>
+          </SettingItem>
+        )}
+        {!systemCoreOnlyBuild && (
+          <SettingItem compatKey="legacy" title="本地内核" divider>
+            <Button
+              size="sm"
+              isPending={changingCore}
+              isDisabled={changingCore}
+              onPress={handleLocalCoreSelect}
+            >
               导入本地内核
             </Button>
-          </div>
-        </SettingItem>
+          </SettingItem>
+        )}
         {core === 'system' && (
           <SettingItem compatKey="legacy" title="内核文件路径" divider>
             <Select
-              aria-label="内核文件路径"
-              classNames={{ trigger: 'data-[hover=true]:bg-default-200' }}
-              className="w-87.5"
-              size="sm"
-              selectedKeys={new Set([appConfig?.systemCorePath || ''])}
-              disallowEmptySelection={availableCorePaths.length > 0}
+              aria-label="系统内核路径"
               isDisabled={changingCore || (loadingPaths && availableCorePaths.length === 0)}
-              onSelectionChange={(v) => {
-                const selectedPath = v.currentKey as string
+              className={['w-87.5'].filter(Boolean).join(' ')}
+              data-size="sm"
+              value={(appConfig?.systemCorePath || '') ?? null}
+              onChange={(v) => {
+                const selectedPath = v as string
                 if (selectedPath) handleConfigChangeWithRestart({ systemCorePath: selectedPath })
               }}
             >
-              {availableCorePaths.length > 0 ? (
-                availableCorePaths.map((path) => <SelectItem key={path}>{path}</SelectItem>)
-              ) : loadingPaths ? (
-                <SelectItem key="">正在查找系统内核...</SelectItem>
-              ) : (
-                <SelectItem key="">未找到系统内核</SelectItem>
-              )}
+              <Select.Trigger className="data-[hover=true]:bg-default-200">
+                <Select.Value />
+                <Select.Indicator />
+              </Select.Trigger>
+              <Select.Popover placement="bottom" shouldFlip containerPadding={56}>
+                <ListBox>
+                  {loadingPaths && availableCorePaths.length === 0 ? (
+                    <ListBox.Item key="" id="" textValue="正在查找系统内核...">
+                      正在查找系统内核...
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
+                  ) : availableCorePaths.length > 0 ? (
+                    availableCorePaths.map((path) => (
+                      <ListBox.Item key={path} id={path} textValue={path}>
+                        {path}
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                    ))
+                  ) : (
+                    <ListBox.Item key="" id="" textValue="未找到系统内核">
+                      未找到系统内核
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
+                  )}
+                </ListBox>
+              </Select.Popover>
             </Select>
             {!loadingPaths && availableCorePaths.length === 0 && (
               <div className="mt-2 text-sm text-warning">
@@ -270,15 +326,13 @@ const Mihomo: React.FC = () => {
         <SettingItem compatKey="legacy" title="内核进程优先级" divider>
           <Select
             aria-label="内核进程优先级"
-            classNames={{ trigger: 'data-[hover=true]:bg-default-200' }}
-            className="w-37.5"
-            size="sm"
-            selectedKeys={new Set([mihomoCpuPriority])}
-            disallowEmptySelection={true}
-            onSelectionChange={async (v) => {
+            className={['w-37.5'].filter(Boolean).join(' ')}
+            data-size="sm"
+            value={mihomoCpuPriority ?? null}
+            onChange={async (v) => {
               try {
                 await patchAppConfig({
-                  mihomoCpuPriority: v.currentKey as Priority
+                  mihomoCpuPriority: v as Priority
                 })
                 await restartCore()
               } catch (e) {
@@ -286,67 +340,115 @@ const Mihomo: React.FC = () => {
               }
             }}
           >
-            <SelectItem key="PRIORITY_HIGHEST">实时</SelectItem>
-            <SelectItem key="PRIORITY_HIGH">高</SelectItem>
-            <SelectItem key="PRIORITY_ABOVE_NORMAL">高于正常</SelectItem>
-            <SelectItem key="PRIORITY_NORMAL">正常</SelectItem>
-            <SelectItem key="PRIORITY_BELOW_NORMAL">低于正常</SelectItem>
-            <SelectItem key="PRIORITY_LOW">低</SelectItem>
+            <Select.Trigger className="data-[hover=true]:bg-default-200">
+              <Select.Value />
+              <Select.Indicator />
+            </Select.Trigger>
+            <Select.Popover placement="bottom" shouldFlip containerPadding={56}>
+              <ListBox>
+                <ListBox.Item key="PRIORITY_HIGHEST" id="PRIORITY_HIGHEST" textValue="实时">
+                  实时
+                  <ListBox.ItemIndicator />
+                </ListBox.Item>
+                <ListBox.Item key="PRIORITY_HIGH" id="PRIORITY_HIGH" textValue="高">
+                  高<ListBox.ItemIndicator />
+                </ListBox.Item>
+                <ListBox.Item
+                  key="PRIORITY_ABOVE_NORMAL"
+                  id="PRIORITY_ABOVE_NORMAL"
+                  textValue="高于正常"
+                >
+                  高于正常
+                  <ListBox.ItemIndicator />
+                </ListBox.Item>
+                <ListBox.Item key="PRIORITY_NORMAL" id="PRIORITY_NORMAL" textValue="正常">
+                  正常
+                  <ListBox.ItemIndicator />
+                </ListBox.Item>
+                <ListBox.Item
+                  key="PRIORITY_BELOW_NORMAL"
+                  id="PRIORITY_BELOW_NORMAL"
+                  textValue="低于正常"
+                >
+                  低于正常
+                  <ListBox.ItemIndicator />
+                </ListBox.Item>
+                <ListBox.Item key="PRIORITY_LOW" id="PRIORITY_LOW" textValue="低">
+                  低<ListBox.ItemIndicator />
+                </ListBox.Item>
+              </ListBox>
+            </Select.Popover>
           </Select>
         </SettingItem>
         <SettingItem compatKey="legacy" title="运行模式" divider>
           <Tabs
-            size="sm"
-            color="primary"
             selectedKey={corePermissionMode}
             onSelectionChange={(key) => handlePermissionModeChange(key as string)}
+            data-color="primary"
+            data-size="sm"
+            data-full-width={false}
           >
-            <Tab key="elevated" title="直接运行" />
-            <Tab key="service" title="系统服务" />
+            <Tabs.ListContainer>
+              <Tabs.List aria-label="选项">
+                <Tabs.Tab key="elevated" id="elevated">
+                  直接运行
+                  <Tabs.Indicator />
+                </Tabs.Tab>
+                <Tabs.Tab key="service" id="service">
+                  系统服务
+                  <Tabs.Indicator />
+                </Tabs.Tab>
+              </Tabs.List>
+            </Tabs.ListContainer>
           </Tabs>
         </SettingItem>
-        {platform === 'linux' && corePermissionMode === 'service' && (
-          <SettingItem compatKey="legacy" title="服务核心运行方式" divider>
-            <Tabs
-              size="sm"
-              color="primary"
-              selectedKey={serviceRunMode}
-              onSelectionChange={(key) =>
-                handleConfigChangeWithRestart({
-                  serviceRunMode: key as AppConfig['serviceRunMode']
-                })
-              }
-            >
-              <Tab key="auto" title="自动" />
-              <Tab key="sandbox" title="沙盒" />
-              <Tab key="direct" title="直接启动" />
-            </Tabs>
-          </SettingItem>
-        )}
         {corePermissionMode !== 'service' && (
           <SettingItem compatKey="legacy" title="启动检测方式" divider>
             <Tabs
-              size="sm"
-              color="primary"
               selectedKey={coreStartupMode}
               onSelectionChange={(key) =>
                 handleConfigChangeWithRestart({
                   coreStartupMode: key as AppConfig['coreStartupMode']
                 })
               }
+              data-color="primary"
+              data-size="sm"
+              data-full-width={false}
             >
-              <Tab key="post-up" title="Post Up" />
-              <Tab key="log" title="日志解析" />
+              <Tabs.ListContainer>
+                <Tabs.List aria-label="选项">
+                  <Tabs.Tab key="post-up" id="post-up">
+                    Post Up
+                    <Tabs.Indicator />
+                  </Tabs.Tab>
+                  <Tabs.Tab key="log" id="log">
+                    日志解析
+                    <Tabs.Indicator />
+                  </Tabs.Tab>
+                </Tabs.List>
+              </Tabs.ListContainer>
             </Tabs>
           </SettingItem>
         )}
-        <SettingItem compatKey="legacy" title="提权状态" divider>
-          <Button size="sm" color="primary" onPress={() => setShowPermissionModal(true)}>
-            管理
-          </Button>
-        </SettingItem>
+        {!systemCoreOnlyBuild && (
+          <SettingItem compatKey="legacy" title="提权状态" divider>
+            <Button
+              size="sm"
+              onPress={() => setShowPermissionModal(true)}
+              variant="primary"
+              data-color="primary"
+            >
+              管理
+            </Button>
+          </SettingItem>
+        )}
         <SettingItem compatKey="legacy" title="服务状态" divider>
-          <Button size="sm" color="primary" onPress={() => setShowServiceModal(true)}>
+          <Button
+            size="sm"
+            onPress={() => setShowServiceModal(true)}
+            variant="primary"
+            data-color="primary"
+          >
             管理
           </Button>
         </SettingItem>
@@ -354,8 +456,15 @@ const Mihomo: React.FC = () => {
           <Switch
             size="sm"
             isSelected={ipv6}
-            onValueChange={(v) => onChangeNeedRestart({ ipv6: v })}
-          />
+            onChange={(v) => onChangeNeedRestart({ ipv6: v })}
+            aria-label="IPv6"
+          >
+            <Switch.Content>
+              <Switch.Control>
+                <Switch.Thumb />
+              </Switch.Control>
+            </Switch.Content>
+          </Switch>
         </SettingItem>
       </SettingCard>
       <PortSetting />

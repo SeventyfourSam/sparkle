@@ -7,7 +7,7 @@ import {
   Separator,
   Surface,
   Tabs
-} from '@heroui-v3/react'
+} from '@heroui/react'
 import type { ReactNode } from 'react'
 import { useMemo, useState } from 'react'
 import { BaseEditor } from '@renderer/components/base/base-editor-lazy'
@@ -17,6 +17,7 @@ import { BiCopy } from 'react-icons/bi'
 
 interface Props {
   connection: ControllerConnectionDetail
+  deviceName?: string
   onClose: () => void
 }
 
@@ -107,7 +108,7 @@ function buildCopyMenuItems(value: string | string[], displayName?: string, pref
   ]
 }
 
-const ConnectionDetailModal = ({ connection, onClose }: Props) => {
+const ConnectionDetailModal = ({ connection, deviceName, onClose }: Props) => {
   const [viewMode, setViewMode] = useState<'detail' | 'raw'>('detail')
   const rawJson = useMemo(() => JSON.stringify(connection, null, 2), [connection])
 
@@ -196,6 +197,7 @@ const ConnectionDetailModal = ({ connection, onClose }: Props) => {
   }
 
   const rows: Array<StaticRow | CopyRow> = [
+    ...(deviceName ? [{ kind: 'static' as const, title: '来源设备', content: deviceName }] : []),
     { kind: 'static', title: '连接建立时间', content: dayjs(connection.start).fromNow() },
     {
       kind: 'static',
@@ -446,6 +448,7 @@ const ConnectionDetailModal = ({ connection, onClose }: Props) => {
               <Modal.Heading>连接详情</Modal.Heading>
             </Modal.Header>
             <Tabs
+              data-size="sm"
               aria-label="连接详情视图"
               className="flex min-h-0 flex-col"
               selectedKey={viewMode}

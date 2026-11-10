@@ -3,7 +3,8 @@ import AdmZip from 'adm-zip'
 import path from 'path'
 import zlib from 'zlib'
 import { extract } from 'tar'
-import { execSync } from 'child_process'
+import { systemCoreOnlyBuild } from './build-env.ts'
+import { execFileSync } from 'child_process'
 
 const cwd = process.cwd()
 const TEMP_DIR = path.join(cwd, 'node_modules/.temp')
@@ -18,8 +19,16 @@ if (process.env.SKIP_PREPARE === '1') {
   process.exit(0)
 }
 
-function getErrorMessage(error: unknown) {
+function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function getPlatformAsset(map: Readonly<Partial<Record<string, string>>>): string {
+  const name = map[`${platform}-${arch}`]
+  if (!name) {
+    throw new Error(`unsupported platform "${platform}-${arch}"`)
+  }
+  return name
 }
 
 /* ======= mihomo alpha======= */
@@ -89,19 +98,14 @@ async function getLatestReleaseVersion() {
 /*
  * check available
  */
-if (!MIHOMO_MAP[`${platform}-${arch}`]) {
-  throw new Error(`unsupported platform "${platform}-${arch}"`)
-}
-
-if (!MIHOMO_ALPHA_MAP[`${platform}-${arch}`]) {
-  throw new Error(`unsupported platform "${platform}-${arch}"`)
-}
+const MIHOMO_NAME = getPlatformAsset(MIHOMO_MAP)
+const MIHOMO_ALPHA_NAME = getPlatformAsset(MIHOMO_ALPHA_MAP)
 
 /**
  * core info
  */
-function MihomoAlpha() {
-  const name = MIHOMO_ALPHA_MAP[`${platform}-${arch}`]
+function MihomoAlpha(): SidecarInfo {
+  const name = MIHOMO_ALPHA_NAME
   const isWin = platform === 'win32'
   const urlExt = isWin ? 'zip' : 'gz'
   const downloadURL = `${MIHOMO_ALPHA_URL_PREFIX}/${name}-${MIHOMO_ALPHA_VERSION}.${urlExt}`
@@ -117,8 +121,8 @@ function MihomoAlpha() {
   }
 }
 
-function mihomo() {
-  const name = MIHOMO_MAP[`${platform}-${arch}`]
+function mihomo(): SidecarInfo {
+  const name = MIHOMO_NAME
   const isWin = platform === 'win32'
   const urlExt = isWin ? 'zip' : 'gz'
   const downloadURL = `${MIHOMO_URL_PREFIX}/${MIHOMO_VERSION}/${name}-${MIHOMO_VERSION}.${urlExt}`
@@ -192,7 +196,7 @@ async function resolveSidecar(binInfo: SidecarInfo) {
         const extractedFilePath = path.join(tempDir, extractedFile)
         fs.renameSync(extractedFilePath, sidecarPath)
         console.log(`[INFO]: "${name}" file renamed to "${sidecarPath}"`)
-        execSync(`chmod 755 ${sidecarPath}`)
+        fs.chmodSync(sidecarPath, 0o755)
         console.log(`[INFO]: "${name}" chmod binary finished`)
       } else {
         throw new Error(`Expected file not found in ${tempDir}`)
@@ -211,7 +215,7 @@ async function resolveSidecar(binInfo: SidecarInfo) {
           .pipe(writeStream)
           .on('finish', () => {
             console.log(`[INFO]: "${name}" gunzip finished`)
-            execSync(`chmod 755 ${sidecarPath}`)
+            fs.chmodSync(sidecarPath, 0o755)
             console.log(`[INFO]: "${name}" chmod binary finished`)
             resolve()
           })
@@ -244,7 +248,7 @@ async function resolveResource(binInfo: ResourceInfo) {
   await downloadFile(downloadURL, targetPath)
 
   if (needExecutable && platform !== 'win32') {
-    execSync(`chmod 755 ${targetPath}`)
+    fs.chmodSync(targetPath, 0o755)
     console.log(`[INFO]: ${file} chmod finished`)
   }
 
@@ -311,10 +315,7 @@ const resolveSparkleService = () => {
     'linux-arm64': 'sparkle-service-linux-arm64',
     'linux-loong64': 'sparkle-service-linux-loong64-abi2'
   }
-  if (!map[`${platform}-${arch}`]) {
-    throw new Error(`unsupported platform "${platform}-${arch}"`)
-  }
-  const base = map[`${platform}-${arch}`]
+  const base = getPlatformAsset(map)
   const ext = platform == 'win32' ? '.exe' : ''
 
   return resolveResource({
@@ -382,7 +383,7 @@ const resolveSubstoreFrontend = async () => {
 
   if (platform !== 'win32') {
     try {
-      const fixPermissions = (dir) => {
+      const fixPermissions = (dir: string): void => {
         const items = fs.readdirSync(dir, { withFileTypes: true })
         for (const item of items) {
           const fullPath = path.join(dir, item.name)
@@ -436,7 +437,9 @@ const tasks: Task[] = [
     func: () =>
       new Promise<void>((resolve, reject) => {
         try {
-          execSync(`node scripts/build-dns-helper.ts --arch=${arch}`, { stdio: 'inherit' })
+          execFileSync(process.execPath, ['scripts/build-dns-helper.ts', `--arch=${arch}`], {
+            stdio: 'inherit'
+          })
           resolve()
         } catch (error) {
           reject(error)
@@ -507,7 +510,12 @@ const tasks: Task[] = [
   }
 ]
 
-async function runTask() {
+if (systemCoreOnlyBuild) {
+  tasks.splice(0, 2)
+  console.log('[INFO]: System-core-only build: skipping mihomo downloads')
+}
+
+async function runTask(): Promise<void> {
   const task = tasks.shift()
   if (!task) return
   if (task.winOnly && platform !== 'win32') return runTask()

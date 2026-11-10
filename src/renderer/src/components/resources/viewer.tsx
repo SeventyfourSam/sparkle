@@ -1,6 +1,6 @@
-import { Button, Modal } from '@heroui-v3/react'
-import { Spinner } from '@heroui/react'
-import React, { useEffect, useState } from 'react'
+import { Spinner, Button, Modal } from '@heroui/react'
+
+import React, { useEffect, useMemo, useState } from 'react'
 import { BaseEditor } from '../base/base-editor-lazy'
 import { TextViewer } from '../base/text-viewer'
 import {
@@ -12,6 +12,7 @@ import {
 import { dump, load } from 'js-yaml'
 import ConfirmModal from '../base/base-confirm'
 import { notify } from '@renderer/utils/notification'
+import { systemCoreOnlyBuild } from '../../../../shared/build-flags'
 type Language = 'yaml' | 'javascript' | 'css' | 'json' | 'text'
 const FILE_PERMISSION_ELEVATION_REQUIRED = 'FILE_PERMISSION_ELEVATION_REQUIRED'
 const TEXT_VIEWER_LINE_LIMIT = 20000
@@ -65,21 +66,33 @@ function hasManyLines(value: string, limit: number): boolean {
 
 const Viewer: React.FC<Props> = (props) => {
   const { type, path, title, format, providerType, onClose, ageSecretKey } = props
+  const source = useMemo(
+    () => ({ ageSecretKey, format, path, providerType, title, type }),
+    [ageSecretKey, format, path, providerType, title, type]
+  )
   const [currData, setCurrData] = useState('')
   const [showPermissionConfirm, setShowPermissionConfirm] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+  const [loadedSource, setLoadedSource] = useState<typeof source | null>(null)
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const language = type === 'Inline' ? 'yaml' : getDefaultLanguage(format)
   const editorLanguage = format === 'MrsRule' ? 'text' : language
   const useTextViewer = type !== 'File' && hasManyLines(currData, TEXT_VIEWER_LINE_LIMIT)
+  const canSave = type === 'File' && !isLoading && loadedSource === source && !isSaving
 
   const save = async (elevated = false): Promise<void> => {
+    if (!canSave) return
     setIsSaving(true)
     try {
       await (elevated ? saveFileStrWithElevation(path, currData) : setFileStr(path, currData))
       onClose()
     } catch (e) {
       if (!elevated && typeof e === 'string' && e.includes(FILE_PERMISSION_ELEVATION_REQUIRED)) {
+        if (systemCoreOnlyBuild) {
+          notify('当前文件没有写入权限，系统内核构建不支持提权保存', { variant: 'danger' })
+          return
+        }
         setShowPermissionConfirm(true)
         return
       }
@@ -91,10 +104,13 @@ const Viewer: React.FC<Props> = (props) => {
 
   useEffect(() => {
     let canceled = false
+    const { ageSecretKey, format, path, providerType, title, type } = source
+    setLoadedSource(null)
+    setIsLoading(true)
+    setCurrData('')
+    setShowPermissionConfirm(false)
 
     if (type !== 'Inline' && !path) {
-      setIsLoading(true)
-      setCurrData('')
       return () => {
         canceled = true
       }
@@ -111,6 +127,7 @@ const Viewer: React.FC<Props> = (props) => {
         setCurrData(
           format === 'MrsRule' ? fileContent : getViewerContent(fileContent, providerType, title)
         )
+        setLoadedSource(source)
       } catch (e) {
         if (!canceled) {
           notify(e, { variant: 'danger' })
@@ -126,11 +143,11 @@ const Viewer: React.FC<Props> = (props) => {
     return () => {
       canceled = true
     }
-  }, [ageSecretKey, format, path, providerType, title, type])
+  }, [source, loadAttempt])
 
   return (
     <Modal>
-      {showPermissionConfirm && (
+      {!systemCoreOnlyBuild && showPermissionConfirm && (
         <ConfirmModal
           onChange={setShowPermissionConfirm}
           title="保存需要提权"
@@ -166,7 +183,12 @@ const Viewer: React.FC<Props> = (props) => {
             <Modal.Body className="h-full">
               {isLoading ? (
                 <div className="flex h-full items-center justify-center">
-                  <Spinner size="lg" />
+                  <Spinner size="lg" color="accent" />
+                </div>
+              ) : loadedSource !== source ? (
+                <div className="flex h-full flex-col items-center justify-center gap-3">
+                  <p>读取文件失败，无法编辑或保存</p>
+                  <Button onPress={() => setLoadAttempt((attempt) => attempt + 1)}>重试</Button>
                 </div>
               ) : useTextViewer ? (
                 <TextViewer value={currData} />
@@ -184,12 +206,12 @@ const Viewer: React.FC<Props> = (props) => {
                 <Button size="sm" variant="secondary" isDisabled={isSaving} onPress={onClose}>
                   取消
                 </Button>
-                <Button size="sm" isPending={isSaving} onPress={() => save()}>
+                <Button size="sm" isDisabled={!canSave} isPending={isSaving} onPress={() => save()}>
                   保存
                 </Button>
               </Modal.Footer>
             )}
-            {type !== 'File' && <Modal.CloseTrigger className="app-nodrag" />}
+            <Modal.CloseTrigger className="app-nodrag" />
           </Modal.Dialog>
         </Modal.Container>
       </Modal.Backdrop>

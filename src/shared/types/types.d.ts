@@ -1,3 +1,6 @@
+declare const __SPARKLE_SYSTEM_CORE_PATH__: string
+declare const __SPARKLE_SYSTEM_SERVICE_PATH__: string
+
 type OutboundMode = 'rule' | 'global' | 'direct'
 type LogLevel = 'info' | 'debug' | 'warning' | 'error' | 'silent'
 type SysProxyMode = 'auto' | 'manual'
@@ -41,7 +44,7 @@ type MihomoProxyType =
   | 'AnyTLS'
   | 'Sudoku'
   | 'Masque'
-type TunStack = 'gvisor' | 'mixed' | 'system'
+type TunStack = 'gvisor' | 'mixed' | 'system' | 'mips'
 type FindProcessMode = 'off' | 'strict' | 'always'
 type DnsMode = 'normal' | 'fake-ip' | 'redir-host'
 type FilterMode = 'blacklist' | 'whitelist'

@@ -5,6 +5,7 @@ import { generateProfile } from '../core/factory'
 import { getAppConfig } from './app'
 import { defaultControledMihomoConfig } from '../utils/template'
 import { deepMerge } from '../utils/merge'
+import { notifyConfigOperation } from '../resolve/webhook'
 
 let controledMihomoConfig: Partial<MihomoConfig> // mihomo.yaml
 
@@ -68,4 +69,5 @@ export async function patchControledMihomoConfig(patch: Partial<MihomoConfig>): 
   controledMihomoConfig = deepMerge(controledMihomoConfig, patch)
   await generateProfile()
   await writeFile(controledMihomoConfigPath(), stringifyYaml(controledMihomoConfig), 'utf-8')
+  notifyConfigOperation('patchControledMihomoConfig', patch)
 }

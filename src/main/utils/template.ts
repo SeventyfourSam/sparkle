@@ -1,7 +1,10 @@
 import os from 'os'
+import { systemCoreDefaultPath, systemCoreOnlyBuild } from '../../shared/build-flags'
 
 export const defaultConfig: AppConfig = {
-  core: 'mihomo',
+  core: systemCoreOnlyBuild ? 'system' : 'mihomo',
+  ...(systemCoreOnlyBuild ? { systemCorePath: systemCoreDefaultPath } : {}),
+  ...(systemCoreOnlyBuild ? { corePermissionMode: 'elevated' as const } : {}),
   updateChannel: 'stable',
   notificationMode: 'system',
   showUpdateButtonAfterNotification: true,
@@ -63,6 +66,7 @@ export const defaultConfig: AppConfig = {
   autoLightweightMode: 'core',
   coreStartupMode: 'post-up',
   serviceRunMode: 'auto',
+  serviceCpuAffinity: [],
   delayTestConcurrency: 50,
   delayTestUseGroupApi: false,
   delayTestUrlScope: 'group',

@@ -1,5 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
-import { closestCorners, DndContext, type DragEndEvent } from '@dnd-kit/core'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import {
+  closestCenter,
+  DndContext,
+  pointerWithin,
+  type CollisionDetection,
+  type DragEndEvent
+} from '@dnd-kit/core'
 import { SortableContext } from '@dnd-kit/sortable'
 import { useNavigate } from 'react-router-dom'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
@@ -9,6 +15,8 @@ import ConnCard from './conn-card'
 import DNSCard from './dns-card'
 import LogCard from './log-card'
 import MihomoCoreCard from './mihomo-core-card'
+import GatewayCard from './gateway-card'
+import { supportsGateway } from '@renderer/utils/init'
 import OverrideCard from './override-card'
 import ProfileCard from './profile-card'
 import ProxyCard from './proxy-card'
@@ -18,8 +26,22 @@ import SniffCard from './sniff-card'
 import SubStoreCard from './substore-card'
 import SysproxySwitcher from './sysproxy-switcher'
 import TunSwitcher from './tun-switcher'
+import { siderSortingStrategy } from './sider-sorting'
+import SiderDropPlaceholder from './sider-drop-placeholder'
 
-const interactiveSelector = 'button:not(.pointer-events-none), [role="switch"]'
+const detectCardCollision: CollisionDetection = (args) => {
+  const visibleArgs = {
+    ...args,
+    droppableContainers: args.droppableContainers.filter(({ id }) => {
+      const rect = args.droppableRects.get(id)
+      return rect && rect.width > 0 && rect.height > 0
+    })
+  }
+  const pointerCollisions = pointerWithin(visibleArgs)
+  return pointerCollisions.length > 0 ? pointerCollisions : closestCenter(visibleArgs)
+}
+
+const interactiveSelector = 'button:not(.pointer-events-none), [role="switch"], .border-switch'
 
 const defaultSiderOrder = [
   'sysproxy',
@@ -43,6 +65,7 @@ const siderCardRouteMap = {
   'profile-card': '/profiles',
   'proxy-card': '/proxies',
   'mihomo-core-card': '/mihomo',
+  'gateway-card': '/gateway',
   'conn-card': '/connections',
   'dns-card': '/dns',
   'sniff-card': '/sniffer',
@@ -63,6 +86,7 @@ const componentMap = {
   profile: ProfileCard,
   proxy: ProxyCard,
   mihomo: MihomoCoreCard,
+  gateway: GatewayCard,
   connection: ConnCard,
   dns: DNSCard,
   sniff: SniffCard,
@@ -75,12 +99,22 @@ const componentMap = {
 
 interface Props {
   iconOnly?: boolean
+  expanded?: boolean
 }
 
-export default function SiderCards({ iconOnly = false }: Props): React.JSX.Element {
+export default function SiderCards({
+  iconOnly = false,
+  expanded = false
+}: Props): React.JSX.Element {
   const { appConfig, patchAppConfig } = useAppConfig()
-  const siderOrder = appConfig?.siderOrder ?? defaultSiderOrder
+  const siderOrder = useMemo(() => {
+    const saved = appConfig?.siderOrder ?? defaultSiderOrder
+    return supportsGateway && !saved.includes('gateway')
+      ? [...saved, 'gateway']
+      : saved.filter((key) => key !== 'gateway' || supportsGateway)
+  }, [appConfig?.siderOrder])
   const [order, setOrder] = useState(siderOrder)
+  const gridRef = useRef<HTMLDivElement>(null)
   const suppressClickRef = useRef(false)
   const suppressClickTimerRef = useRef<number | undefined>(undefined)
   const navigate = useNavigate()
@@ -117,6 +151,7 @@ export default function SiderCards({ iconOnly = false }: Props): React.JSX.Eleme
       const newOrder = order.slice()
       const activeIndex = newOrder.indexOf(active.id as string)
       const overIndex = newOrder.indexOf(over.id as string)
+      if (activeIndex < 0 || overIndex < 0) return
       newOrder.splice(activeIndex, 1)
       newOrder.splice(overIndex, 0, active.id as string)
       setOrder(newOrder)
@@ -146,7 +181,7 @@ export default function SiderCards({ iconOnly = false }: Props): React.JSX.Eleme
   const cards = order.map((key: string) => {
     const Component = componentMap[key]
     if (!Component) return null
-    return <Component key={key} iconOnly={iconOnly} />
+    return <Component key={key} iconOnly={iconOnly} expanded={expanded} />
   })
 
   if (iconOnly) {
@@ -161,7 +196,7 @@ export default function SiderCards({ iconOnly = false }: Props): React.JSX.Eleme
     <div style={{ overflowX: 'clip' }}>
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCorners}
+        collisionDetection={detectCardCollision}
         onDragStart={() => {
           suppressClickRef.current = true
         }}
@@ -170,8 +205,15 @@ export default function SiderCards({ iconOnly = false }: Props): React.JSX.Eleme
           void onDragEnd(event).finally(releaseClickSuppression)
         }}
       >
-        <div className="grid grid-cols-2 gap-2 m-2" onClickCapture={onClickCapture}>
-          <SortableContext items={order}>{cards}</SortableContext>
+        <div
+          ref={gridRef}
+          className="sider-cards relative grid grid-cols-2 gap-2 m-2"
+          onClickCapture={onClickCapture}
+        >
+          <SiderDropPlaceholder order={order} gridRef={gridRef} />
+          <SortableContext items={order} strategy={siderSortingStrategy}>
+            {cards}
+          </SortableContext>
         </div>
       </DndContext>
     </div>

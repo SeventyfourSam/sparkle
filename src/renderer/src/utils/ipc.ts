@@ -13,6 +13,38 @@ export async function mihomoVersion(): Promise<ControllerVersion> {
   return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('mihomoVersion'))
 }
 
+export async function getLanternStatus(): Promise<LanternSnapshot> {
+  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('getLanternStatus'))
+}
+
+export async function getLanternInterfaces(): Promise<LanternNetwork> {
+  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('getLanternInterfaces'))
+}
+
+export async function startLantern(options: LanternOptions): Promise<LanternSnapshot> {
+  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('startLantern', options))
+}
+
+export async function stopLantern(): Promise<LanternSnapshot> {
+  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('stopLantern'))
+}
+
+export async function configureLantern(options: LanternOptions): Promise<LanternSnapshot> {
+  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('configureLantern', options))
+}
+
+export async function probeLanternDHCP(name: string): Promise<LanternProbe> {
+  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('probeLanternDHCP', name))
+}
+
+export async function resumeLanternDHCP(): Promise<LanternSnapshot> {
+  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('resumeLanternDHCP'))
+}
+
+export async function setLanternGatewayDevices(macs: string[]): Promise<LanternSnapshot> {
+  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('setLanternGatewayDevices', macs))
+}
+
 export async function mihomoConfig(): Promise<ControllerConfigs> {
   return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('mihomoConfig'))
 }
@@ -122,6 +154,10 @@ export async function disableAutoRun(): Promise<void> {
 
 export async function getAppConfig(force = false): Promise<AppConfig> {
   return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('getAppConfig', force))
+}
+
+export async function testWebhook(config: WebhookTarget): Promise<void> {
+  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('testWebhook', config))
 }
 
 export async function getCachedMihomoLogs(): Promise<

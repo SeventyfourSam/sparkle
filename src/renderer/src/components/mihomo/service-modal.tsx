@@ -1,11 +1,17 @@
+import { Spinner, Button, Modal, Tabs } from '@heroui/react'
+
 import React, { useEffect, useState, useCallback } from 'react'
-import { Button, Spinner, Card, CardBody, Chip, Divider } from '@heroui/react'
-import { Modal } from '@heroui-v3/react'
+
 import { serviceStatus, testServiceConnection } from '@renderer/utils/ipc'
+import { platform } from '@renderer/utils/init'
 import { notify } from '@renderer/utils/notification'
 
 interface Props {
   onChange: (open: boolean) => void
+  serviceRunMode: NonNullable<AppConfig['serviceRunMode']>
+  onRunModeChange: (mode: NonNullable<AppConfig['serviceRunMode']>) => Promise<void>
+  serviceCpuAffinity: number[]
+  onCpuAffinityChange: (cpus: number[]) => Promise<void>
   onInit: () => Promise<void>
   onInstall: () => Promise<void>
   onUninstall: () => Promise<void>
@@ -35,11 +41,69 @@ async function readServiceStatus(): Promise<ServiceStatusType> {
   }
 }
 
+type StatusTone = 'success' | 'warning' | 'danger' | 'default'
+
+const statusDotStyles: Record<StatusTone, string> = {
+  success: 'bg-success',
+  warning: 'bg-warning',
+  danger: 'bg-danger',
+  default: 'bg-default-400'
+}
+
+function getStatusMeta(
+  status: ServiceStatusType | null,
+  connectionStatus: ConnectionStatusType
+): { label: string; tone: StatusTone } {
+  if (status === null || connectionStatus === 'checking') {
+    return { label: '正在检查', tone: 'default' }
+  }
+
+  switch (status) {
+    case 'running':
+      return connectionStatus === 'connected'
+        ? { label: '运行中 · 已连接', tone: 'success' }
+        : { label: '运行中 · 未连接', tone: 'danger' }
+    case 'stopped':
+      return { label: '已停止', tone: 'warning' }
+    case 'not-installed':
+      return { label: '未安装', tone: 'default' }
+    case 'need-init':
+      return { label: '需要初始化', tone: 'warning' }
+    case 'paused':
+      return { label: '已暂停', tone: 'warning' }
+    default:
+      return { label: '状态未知', tone: 'default' }
+  }
+}
+
 const ServiceModal: React.FC<Props> = (props) => {
-  const { onChange, onInit, onInstall, onUninstall, onStart, onRestart } = props
+  const {
+    onChange,
+    serviceRunMode,
+    onRunModeChange,
+    serviceCpuAffinity,
+    onCpuAffinityChange,
+    onInit,
+    onInstall,
+    onUninstall,
+    onStart,
+    onRestart
+  } = props
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState<ServiceStatusType | null>(null)
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatusType>('checking')
+  const cpuCount = Math.max(1, navigator.hardwareConcurrency || 1)
+  const cpuList = Array.from({ length: cpuCount }, (_, index) => index)
+  const cpuRows = Array.from({ length: Math.ceil(cpuList.length / 12) }, (_, row) =>
+    cpuList.slice(row * 12, row * 12 + 12)
+  )
+
+  const toggleCpu = (cpu: number): void => {
+    const next = serviceCpuAffinity.includes(cpu)
+      ? serviceCpuAffinity.filter((item) => item !== cpu)
+      : [...serviceCpuAffinity, cpu].sort((a, b) => a - b)
+    void onCpuAffinityChange(next)
+  }
 
   const refreshServiceStatus = useCallback(async (nextStatus?: ServiceStatusType) => {
     const result = nextStatus ?? (await readServiceStatus())
@@ -90,36 +154,8 @@ const ServiceModal: React.FC<Props> = (props) => {
     void refreshServiceStatus()
   }, [refreshServiceStatus])
 
-  const getStatusText = (): string => {
-    if (status === null) return '检查中'
-    switch (status) {
-      case 'running':
-        return '运行中'
-      case 'stopped':
-        return '已停止'
-      case 'not-installed':
-        return '未安装'
-      case 'need-init':
-        return '需要初始化'
-      case 'paused':
-        return '已暂停'
-      default:
-        return '未知状态'
-    }
-  }
-
-  const getConnectionStatusText = (): string => {
-    switch (connectionStatus) {
-      case 'connected':
-        return '已连接'
-      case 'disconnected':
-        return '未连接'
-      case 'checking':
-        return '检测中'
-      default:
-        return '未知'
-    }
-  }
+  const isChecking = status === null || connectionStatus === 'checking'
+  const statusMeta = getStatusMeta(status, connectionStatus)
 
   return (
     <Modal>
@@ -130,159 +166,167 @@ const ServiceModal: React.FC<Props> = (props) => {
         className="top-12 h-[calc(100%-48px)]"
       >
         <Modal.Container scroll="inside">
-          <Modal.Dialog className="w-112.5">
-            <Modal.Header className="flex-col gap-1">
+          <Modal.Dialog className="w-112.5 max-w-[calc(100vw-32px)]">
+            <Modal.Header className="app-drag">
               <Modal.Heading>Sparkle 服务管理</Modal.Heading>
             </Modal.Header>
-            <Modal.Body>
-              <div className="space-y-4">
-                <Card
-                  shadow="sm"
-                  className="border-none bg-linear-to-br from-default-50 to-default-100"
+            <Modal.Body className="divide-y divide-default-200">
+              <div className="flex h-11 items-center gap-3">
+                <span className="w-20 shrink-0 text-sm">服务状态</span>
+                <div
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                  className="flex min-w-0 flex-1 items-center justify-end gap-2 text-sm"
                 >
-                  <CardBody className="py-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">服务状态</span>
-                      </div>
-                      {status === null ? (
-                        <Chip
-                          color="default"
-                          variant="flat"
-                          size="sm"
-                          startContent={<Spinner size="sm" color="current" />}
-                        >
-                          检查中...
-                        </Chip>
-                      ) : (
-                        <Chip
-                          color={
-                            status === 'running'
-                              ? 'success'
-                              : status === 'stopped'
-                                ? 'warning'
-                                : status === 'not-installed'
-                                  ? 'danger'
-                                  : status === 'need-init'
-                                    ? 'warning'
-                                    : 'default'
-                          }
-                          variant="flat"
-                          size="sm"
-                        >
-                          {getStatusText()}
-                        </Chip>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">连接状态</span>
-                      </div>
-                      {connectionStatus === 'checking' ? (
-                        <Chip
-                          color="default"
-                          variant="flat"
-                          size="sm"
-                          startContent={<Spinner size="sm" color="current" />}
-                        >
-                          检测中...
-                        </Chip>
-                      ) : (
-                        <Chip
-                          color={
-                            connectionStatus === 'connected'
-                              ? 'success'
-                              : connectionStatus === 'disconnected'
-                                ? 'danger'
-                                : 'default'
-                          }
-                          variant="flat"
-                          size="sm"
-                        >
-                          {getConnectionStatusText()}
-                        </Chip>
-                      )}
-                    </div>
-                  </CardBody>
-                </Card>
-
-                <Divider />
-
-                <div className="text-xs text-default-500 space-y-2">
-                  <div className="flex items-start gap-2">
-                    <span>提供系统代理设置和核心进程管理的提权功能</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span>未安装状态下部分高级功能将无法使用</span>
-                  </div>
+                  {isChecking ? (
+                    <Spinner size="sm" color="current" aria-label="正在检查服务状态" />
+                  ) : (
+                    <span
+                      className={`size-2 shrink-0 rounded-full ${statusDotStyles[statusMeta.tone]}`}
+                      aria-hidden="true"
+                    />
+                  )}
+                  <span className="whitespace-nowrap text-default-600">{statusMeta.label}</span>
                 </div>
               </div>
-            </Modal.Body>
-            <Modal.Footer className="flex-col gap-2 sm:flex-row">
-              <Button
-                size="sm"
-                variant="light"
-                onPress={() => onChange(false)}
-                isDisabled={loading}
-                className="sm:mr-auto"
-              >
-                关闭
-              </Button>
 
+              {platform === 'linux' && (
+                <div className="flex h-11 items-center gap-3">
+                  <span className="w-20 shrink-0 text-sm">运行方式</span>
+                  <div className="flex min-w-0 flex-1 justify-end">
+                    <Tabs
+                      selectedKey={serviceRunMode}
+                      onSelectionChange={(key) =>
+                        onRunModeChange(key as NonNullable<AppConfig['serviceRunMode']>)
+                      }
+                      isDisabled={loading}
+                      data-color="primary"
+                      data-size="sm"
+                    >
+                      <Tabs.ListContainer>
+                        <Tabs.List aria-label="服务核心运行方式">
+                          <Tabs.Tab id="auto">
+                            自动
+                            <Tabs.Indicator />
+                          </Tabs.Tab>
+                          <Tabs.Tab id="sandbox">
+                            沙盒
+                            <Tabs.Indicator />
+                          </Tabs.Tab>
+                          <Tabs.Tab id="direct">
+                            直接启动
+                            <Tabs.Indicator />
+                          </Tabs.Tab>
+                        </Tabs.List>
+                      </Tabs.ListContainer>
+                    </Tabs>
+                  </div>
+                </div>
+              )}
+
+              {(platform === 'linux' || platform === 'win32') && (
+                <div className="flex min-h-11 items-start gap-3 py-2">
+                  <span className="w-20 shrink-0 pt-1 text-sm">核心绑定</span>
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    {cpuRows.map((row, rowIndex) => (
+                      <div
+                        key={rowIndex}
+                        className={`flex gap-0.5 ${cpuRows.length === 1 ? 'justify-end' : 'justify-start'}`}
+                      >
+                        {row.map((cpu) => {
+                          const selected = serviceCpuAffinity.includes(cpu)
+                          return (
+                            <button
+                              key={cpu}
+                              type="button"
+                              aria-label={`核心 ${cpu}`}
+                              aria-pressed={selected}
+                              disabled={loading}
+                              className={`flex size-6 shrink-0 items-center justify-center rounded-md text-xs font-medium tabular-nums transition-all disabled:pointer-events-none disabled:opacity-50 ${
+                                selected
+                                  ? 'bg-primary text-primary-foreground shadow-sm'
+                                  : 'bg-default-100 text-default-500 hover:bg-default-200 hover:text-foreground'
+                              }`}
+                              onClick={() => toggleCpu(cpu)}
+                            >
+                              {cpu}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </Modal.Body>
+            <Modal.Footer className="flex-col gap-2 sm:flex-row sm:items-center">
               {status === 'unknown' ? null : status === 'not-installed' ? (
                 <Button
                   size="sm"
-                  color="primary"
-                  variant="shadow"
                   onPress={() => handleAction(onInstall)}
-                  isLoading={loading}
+                  variant="primary"
+                  data-color="primary"
+                  data-shadow="true"
+                  className="w-full sm:ml-auto sm:w-auto sm:min-w-18"
+                  isPending={loading}
+                  isDisabled={loading}
                 >
-                  安装服务
+                  {loading ? <Spinner size="sm" color="current" /> : null}安装服务
                 </Button>
               ) : (
                 <>
                   <Button
                     size="sm"
-                    color="primary"
-                    variant="flat"
                     onPress={() => handleAction(onInit)}
-                    isLoading={loading}
+                    variant="secondary"
+                    data-color="default"
+                    className="w-full sm:w-auto sm:min-w-18"
+                    isPending={loading}
+                    isDisabled={loading}
                   >
+                    {loading ? <Spinner size="sm" color="current" /> : null}
                     {status === 'need-init' ? '初始化' : '重置认证'}
                   </Button>
                   <Button
                     size="sm"
-                    color="primary"
-                    variant="flat"
                     onPress={() => handleAction(onRestart)}
-                    isLoading={loading}
+                    variant="secondary"
+                    data-color="default"
+                    className="w-full sm:w-auto sm:min-w-18"
+                    isPending={loading}
+                    isDisabled={loading}
                   >
-                    重启
+                    {loading ? <Spinner size="sm" color="current" /> : null}重启
                   </Button>
                   {status !== 'running' && status !== 'need-init' ? (
                     <Button
                       size="sm"
-                      color="success"
-                      variant="shadow"
                       onPress={() => handleAction(onStart, true)}
-                      isLoading={loading}
+                      variant="primary"
+                      data-color="primary"
+                      className="w-full sm:w-auto sm:min-w-18"
+                      data-shadow="true"
+                      isPending={loading}
+                      isDisabled={loading}
                     >
-                      启动
+                      {loading ? <Spinner size="sm" color="current" /> : null}启动
                     </Button>
                   ) : null}
                   <Button
                     size="sm"
-                    color="danger"
-                    variant="flat"
                     onPress={() => handleAction(onUninstall)}
-                    isLoading={loading}
+                    variant="danger-soft"
+                    className="w-full sm:ml-auto sm:w-auto sm:min-w-18"
+                    isPending={loading}
+                    isDisabled={loading}
                   >
-                    卸载
+                    {loading ? <Spinner size="sm" color="current" /> : null}卸载
                   </Button>
                 </>
               )}
             </Modal.Footer>
+            <Modal.CloseTrigger className="app-nodrag" />
           </Modal.Dialog>
         </Modal.Container>
       </Modal.Backdrop>

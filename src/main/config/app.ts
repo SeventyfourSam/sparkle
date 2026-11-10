@@ -4,9 +4,21 @@ import { parseYaml, stringifyYaml } from '../utils/yaml'
 import { deepMerge } from '../utils/merge'
 import { defaultConfig } from '../utils/template'
 import { readFileSync, existsSync } from 'fs'
+import { systemCoreDefaultPath, systemCoreOnlyBuild } from '../../shared/build-flags'
+import { notifyConfigOperation } from '../resolve/webhook'
 
 let appConfig: AppConfig
 let writePromise: Promise<void> = Promise.resolve()
+
+function applyBuildConfig(config: AppConfig): AppConfig {
+  if (!systemCoreOnlyBuild) return config
+
+  return {
+    ...config,
+    core: 'system',
+    systemCorePath: config.systemCorePath || systemCoreDefaultPath
+  }
+}
 
 function isValidConfig(config: unknown): config is AppConfig {
   if (!config || typeof config !== 'object') return false
@@ -58,6 +70,7 @@ export async function getAppConfig(force = false): Promise<AppConfig> {
     }
   }
   if (typeof appConfig !== 'object') appConfig = defaultConfig
+  appConfig = applyBuildConfig(appConfig)
   return appConfig
 }
 
@@ -65,11 +78,13 @@ export async function patchAppConfig(patch: Partial<AppConfig>): Promise<AppConf
   const previousPromise = writePromise
   const currentPromise = (async () => {
     await previousPromise
-    appConfig = deepMerge(appConfig, patch)
-    await safeWriteConfig(stringifyYaml(appConfig))
+    const nextConfig = applyBuildConfig(deepMerge(structuredClone(appConfig), patch))
+    await safeWriteConfig(stringifyYaml(nextConfig))
+    appConfig = nextConfig
   })()
   writePromise = currentPromise.catch(() => {})
   await currentPromise
+  notifyConfigOperation('patchAppConfig', patch)
   return appConfig
 }
 
@@ -78,10 +93,10 @@ export function getAppConfigSync(): AppConfig {
     const raw = readFileSync(appConfigPath(), 'utf-8')
     const data = parseYaml<AppConfig>(raw)
     if (typeof data === 'object' && data !== null) {
-      return data
+      return applyBuildConfig(data)
     }
-    return defaultConfig
+    return applyBuildConfig(defaultConfig)
   } catch (e) {
-    return defaultConfig
+    return applyBuildConfig(defaultConfig)
   }
 }
