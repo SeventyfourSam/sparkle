@@ -9,12 +9,11 @@ import EditInfoModal from './edit-info-modal'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import ExecLogModal from './exec-log-modal'
-import { openFile, restartCore } from '@renderer/utils/ipc'
-import { useProfileConfig } from '@renderer/hooks/use-profile-config'
+import OverrideStatusChip from '@renderer/custom/override-status-chip'
+import { openFile } from '@renderer/utils/ipc'
 import ConfirmModal from '../base/base-confirm'
 import QRCodeModal from '../base/base-qrcode-modal'
 import { notify } from '@renderer/utils/notification'
-import { isOverrideUsedByCurrentProfile } from '@renderer/utils/override'
 
 interface Props {
   info: OverrideItem
@@ -35,7 +34,6 @@ interface MenuItem {
 const OverrideItem: React.FC<Props> = (props) => {
   const { info, addOverrideItem, removeOverrideItem, mutateOverrideConfig, updateOverrideItem } =
     props
-  const { profileConfig } = useProfileConfig()
   const [updating, setUpdating] = useState(false)
   const [openInfoEditor, setOpenInfoEditor] = useState(false)
   const [openFileEditor, setOpenFileEditor] = useState(false)
@@ -224,9 +222,6 @@ const OverrideItem: React.FC<Props> = (props) => {
                         setUpdating(true)
                         try {
                           await addOverrideItem(info)
-                          if (isOverrideUsedByCurrentProfile(profileConfig, info.id, info.global)) {
-                            await restartCore()
-                          }
                         } catch (e) {
                           notify(e, { variant: 'danger' })
                         } finally {
@@ -272,22 +267,22 @@ const OverrideItem: React.FC<Props> = (props) => {
                 </div>
               </div>
               <div className="flex justify-between">
-                <div className={`mt-2 flex justify-start`}>
+                <div className={`mt-2 flex flex-wrap items-center gap-y-2 justify-start`}>
                   {info.global && (
                     <Chip
                       size="sm"
-                      data-color="primary"
+                      data-color="default"
                       variant="tertiary"
-                      data-dot="true"
+                      data-outline="true"
                       className={['mr-2'].filter(Boolean).join(' ')}
                     >
-                      <span className="chip__dot" aria-hidden="true" />
                       <Chip.Label>全局</Chip.Label>
                     </Chip>
                   )}
                   <Chip size="sm" data-color="default" variant="tertiary" data-outline="true">
                     <Chip.Label>{info.ext === 'yaml' ? 'YAML' : 'JavaScript'}</Chip.Label>
                   </Chip>
+                  <OverrideStatusChip id={info.id} />
                 </div>
                 {info.type === 'remote' && (
                   <div className={`mt-2 flex justify-end`}>

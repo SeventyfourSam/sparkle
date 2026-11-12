@@ -21,6 +21,7 @@ import vm from 'vm'
 import { existsSync, writeFileSync } from 'fs'
 import path from 'path'
 import { finalizeCustomProfile } from '../custom/profile'
+import type { ProfileGeneration } from '../custom/profile-builder'
 
 let runtimeConfigStr: string,
   rawProfileStr: string,
@@ -28,23 +29,29 @@ let runtimeConfigStr: string,
   overrideProfileStr: string,
   runtimeConfig: MihomoConfig
 
-export async function generateProfile(): Promise<void> {
+export async function generateProfile(options?: ProfileGeneration): Promise<void> {
   const [profileConfig, appConfig, controledMihomoConfig] = await Promise.all([
     getProfileConfig(),
     getAppConfig(),
     getControledMihomoConfig()
   ])
+  const appSnapshot = JSON.parse(JSON.stringify(appConfig)) as AppConfig
+  const controlledSnapshot = JSON.parse(
+    JSON.stringify(options?.controlledConfig ?? controledMihomoConfig)
+  ) as Partial<MihomoConfig>
   const { current } = profileConfig
-  const { diffWorkDir = false, controlDns = true, controlSniff = true } = appConfig
+  const { diffWorkDir = false, controlDns = true, controlSniff = true } = appSnapshot
   const nextRawProfileStr = await getProfileStr(current)
   let currentProfileConfig = parseYaml<MihomoConfig>(nextRawProfileStr)
   if (typeof currentProfileConfig !== 'object') currentProfileConfig = {} as MihomoConfig
-  rawProfileStr = nextRawProfileStr
-  currentProfileStr = stringifyYaml(currentProfileConfig)
-  const currentProfile = await overrideProfile(current, currentProfileConfig)
-  overrideProfileStr = stringifyYaml(currentProfile)
+  const nextCurrentProfileStr = stringifyYaml(currentProfileConfig)
+  const currentProfile = await (options?.overrideProfile ?? overrideProfile)(
+    current,
+    currentProfileConfig
+  )
+  const nextOverrideProfileStr = stringifyYaml(currentProfile)
 
-  const configToMerge = JSON.parse(JSON.stringify(controledMihomoConfig))
+  const configToMerge = JSON.parse(JSON.stringify(controlledSnapshot))
   if (!controlDns) {
     delete configToMerge.dns
     delete configToMerge.hosts
@@ -63,15 +70,48 @@ export async function generateProfile(): Promise<void> {
   await cleanProfile(profile, controlDns, controlSniff)
   finalizeCustomProfile(profile, controlDns)
 
-  runtimeConfig = profile
-  runtimeConfigStr = stringifyYaml(profile)
   if (diffWorkDir) {
     await prepareProfileWorkDir(current)
   }
+  if (options?.onPrepared) {
+    options.onPrepared({
+      config: profile,
+      yaml: stringifyYaml(profile),
+      raw: nextRawProfileStr,
+      currentYaml: nextCurrentProfileStr,
+      overrideYaml: nextOverrideProfileStr,
+      current,
+      appConfig: appSnapshot,
+      controlledConfig: controlledSnapshot,
+      workDir: diffWorkDir ? mihomoProfileWorkDir(current) : mihomoWorkDir(),
+      configPath: diffWorkDir ? mihomoWorkConfigPath(current) : mihomoWorkConfigPath('work')
+    })
+    return
+  }
+  setRuntimeProfile({
+    config: profile,
+    yaml: stringifyYaml(profile),
+    raw: nextRawProfileStr,
+    currentYaml: nextCurrentProfileStr,
+    overrideYaml: nextOverrideProfileStr
+  })
   await writeFile(
     diffWorkDir ? mihomoWorkConfigPath(current) : mihomoWorkConfigPath('work'),
     runtimeConfigStr
   )
+}
+
+export function setRuntimeProfile(
+  profile: Pick<
+    import('../custom/profile-builder').PreparedProfile,
+    'config' | 'yaml' | 'raw' | 'currentYaml' | 'overrideYaml'
+  >
+): void {
+  runtimeConfig = profile.config
+  runtimeConfigStr = profile.yaml
+  rawProfileStr = profile.raw
+  currentProfileStr = profile.currentYaml
+  overrideProfileStr = profile.overrideYaml
 }
 
 async function cleanProfile(

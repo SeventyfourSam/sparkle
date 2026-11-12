@@ -12,10 +12,7 @@ import {
 import type { ReactNode } from 'react'
 import React, { useState } from 'react'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
-import { useProfileConfig } from '@renderer/hooks/use-profile-config'
-import { restartCore } from '@renderer/utils/ipc'
 import { notify } from '@renderer/utils/notification'
-import { isOverrideUsedByCurrentProfile } from '@renderer/utils/override'
 
 interface Props {
   item: OverrideItem
@@ -26,7 +23,6 @@ interface Props {
 const EditInfoModal: React.FC<Props> = (props) => {
   const { item, updateOverrideItem, onClose } = props
   useAppConfig()
-  const { profileConfig } = useProfileConfig()
   const [values, setValues] = useState(item)
 
   const onSave = async (): Promise<void> => {
@@ -36,14 +32,6 @@ const EditInfoModal: React.FC<Props> = (props) => {
       }
 
       await updateOverrideItem(itemToSave)
-      const usedByCurrent = isOverrideUsedByCurrentProfile(
-        profileConfig,
-        item.id,
-        item.global || itemToSave.global
-      )
-      if (item.id && usedByCurrent) {
-        await restartCore()
-      }
       onClose()
     } catch (e) {
       notify(e, { variant: 'danger' })

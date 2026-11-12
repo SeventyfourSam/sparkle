@@ -21,3 +21,8 @@ interface MihomoHookProvider {
   command?: string
   args?: string[]
 }
+
+interface OverrideStatus {
+  state: 'active' | 'inactive' | 'error' | 'checking'
+  message: string
+}

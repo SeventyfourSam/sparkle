@@ -1,5 +1,13 @@
 import { app, ipcMain } from 'electron'
 import {
+  saveOverride,
+  saveOverrideConfig,
+  saveOverrideItem,
+  createOverrideItem,
+  deleteOverrideItem
+} from '../custom/config-actions'
+import { getOverrideStatuses } from '../custom/override-status'
+import {
   mihomoChangeProxy,
   mihomoCloseConnections,
   mihomoCloseConnection,
@@ -44,13 +52,8 @@ import {
   updateProfileItem,
   setProfileConfig,
   getOverrideConfig,
-  setOverrideConfig,
   getOverrideItem,
-  addOverrideItem,
-  removeOverrideItem,
-  getOverride,
-  setOverride,
-  updateOverrideItem
+  getOverride
 } from '../config'
 import {
   startSubStoreFrontendServer,
@@ -328,14 +331,15 @@ export function registerIpcMainHandlers(): void {
   handle('addProfileItem', (_e, item) => ipcErrorWrapper(addProfileItem)(item))
   handle('removeProfileItem', (_e, id) => ipcErrorWrapper(removeProfileItem)(id))
   handle('getOverrideConfig', (_e, force) => ipcErrorWrapper(getOverrideConfig)(force))
-  handle('setOverrideConfig', (_e, config) => ipcErrorWrapper(setOverrideConfig)(config))
+  handle('setOverrideConfig', (_e, config) => ipcErrorWrapper(saveOverrideConfig)(config))
   handle('getOverrideItem', (_e, id) => ipcErrorWrapper(getOverrideItem)(id))
-  handle('addOverrideItem', (_e, item) => ipcErrorWrapper(addOverrideItem)(item))
-  handle('removeOverrideItem', (_e, id) => ipcErrorWrapper(removeOverrideItem)(id))
-  handle('updateOverrideItem', (_e, item) => ipcErrorWrapper(updateOverrideItem)(item))
+  handle('addOverrideItem', (_e, item) => ipcErrorWrapper(createOverrideItem)(item))
+  handle('removeOverrideItem', (_e, id) => ipcErrorWrapper(deleteOverrideItem)(id))
+  handle('updateOverrideItem', (_e, item) => ipcErrorWrapper(saveOverrideItem)(item))
   handle('getOverride', (_e, id, ext) => ipcErrorWrapper(getOverride)(id, ext))
-  handle('setOverride', (_e, id, ext, str) => ipcErrorWrapper(setOverride)(id, ext, str))
-  handle('restartCore', ipcErrorWrapper(restartCore))
+  handle('setOverride', (_e, id, ext, str) => ipcErrorWrapper(saveOverride)(id, ext, str))
+  handle('getOverrideStatuses', ipcErrorWrapper(getOverrideStatuses))
+  handle('restartCore', (_e, force) => ipcErrorWrapper(restartCore)(Boolean(force)))
   handle('stopCore', ipcErrorWrapper(stopCore))
   handle('restartMihomoConnections', ipcErrorWrapper(restartMihomoConnections))
   handle('startMonitor', (_e, detached) => ipcErrorWrapper(startMonitor)(detached))

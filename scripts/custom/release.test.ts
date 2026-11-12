@@ -27,14 +27,29 @@ test('the published update manifest names the tested version and all three platf
   await writeFile(path.join(dir, 'changelog.md'), 'Release notes\nwith "quotes" and 中文')
   await mkdir(path.join(dir, 'dist'))
   for (const file of releaseArtifacts(version)) await writeFile(path.join(dir, 'dist', file), file)
-  execFileSync(process.execPath, [path.join(import.meta.dirname, 'release.ts'), 'manifest'], {
-    cwd: dir,
-    windowsHide: true,
-    env: { ...process.env, VERSION: version, MIHOMO_RELEASE_VERSION: 'v1.19.33-custom.3' }
-  })
+  const generate = () =>
+    execFileSync(process.execPath, [path.join(import.meta.dirname, 'release.ts'), 'manifest'], {
+      cwd: dir,
+      windowsHide: true,
+      env: { ...process.env, VERSION: version, MIHOMO_RELEASE_VERSION: 'v1.19.33-custom.3' }
+    })
+  generate()
   const manifest = parse(await readFile(path.join(dir, 'latest.yml'), 'utf8'))
   assert.equal(manifest.version, version)
   assert.equal(manifest.tag, `v${version}`)
   assert.match(manifest.changelog, /with "quotes" and 中文/)
   assert.equal((await readFile(path.join(dir, 'SHA256SUMS'), 'utf8')).trim().split('\n').length, 3)
+  await mkdir(path.join(dir, 'scripts', 'custom'), { recursive: true })
+  await writeFile(
+    path.join(dir, 'scripts', 'custom', 'release-notes.md'),
+    'Custom 配置预检与热加载'
+  )
+  generate()
+  const withCustom = parse(await readFile(path.join(dir, 'latest.yml'), 'utf8'))
+  assert.match(withCustom.changelog, /Custom 配置预检与热加载/)
+  assert.match(withCustom.changelog, /with "quotes" and 中文/)
+  assert.equal(
+    await readFile(path.join(dir, 'release-notes.md'), 'utf8'),
+    `${withCustom.changelog}\n`
+  )
 })

@@ -2,7 +2,16 @@ import { ChildProcess, spawn } from 'child_process'
 import { createInterface } from 'readline'
 import { dataDir, coreLogPath, mihomoCorePath } from '../utils/dirs'
 import { systemCoreOnlyBuild } from '../../shared/build-flags'
-import { generateProfile, getRuntimeConfig } from './factory'
+import { getRuntimeConfig } from './factory'
+import { commitProfile, getCommittedProfile, type PreparedProfile } from '../custom/profile-builder'
+import {
+  applyConfiguration,
+  attachRunningCore,
+  markProfileApplied,
+  markProfileStopped,
+  prepareCheckedProfile,
+  recoverAppliedConfiguration
+} from '../custom/config-application'
 import {
   getAppConfig,
   getControledMihomoConfig,
@@ -48,7 +57,6 @@ import {
 import { createCoreHookWaiter, createCoreStartupHook } from './startupHook'
 import { stopChildProcess } from './process-control'
 import { recoverDNS, setPublicDNS, startNetworkDetectionController } from './network'
-import { checkProfile } from './profile-check'
 import {
   createCoreEnvironment,
   createCoreSpawnArgs,
@@ -227,6 +235,8 @@ async function completeCoreInitialization(
   child?: ChildProcess
 ): Promise<void> {
   await customCore.onReady()
+  const appliedProfile = getCommittedProfile()
+  if (appliedProfile) await markProfileApplied(appliedProfile)
   if (
     child?.pid &&
     child === directCoreState.child &&
@@ -342,12 +352,13 @@ async function getServiceStatusAfterConnectionError(): Promise<
   }
 }
 
-export async function startCore(detached = false): Promise<Promise<void>[]> {
-  const [appConfig, controlledMihomoConfig, profileConfig] = await Promise.all([
-    getAppConfig(),
-    getControledMihomoConfig(),
-    getProfileConfig()
-  ])
+export async function startCore(
+  detached = false,
+  prepared?: PreparedProfile
+): Promise<Promise<void>[]> {
+  const [appConfig, controlledMihomoConfig, profileConfig] = prepared
+    ? [prepared.appConfig, prepared.controlledConfig, { current: prepared.current }]
+    : await Promise.all([getAppConfig(), getControledMihomoConfig(), getProfileConfig()])
   const {
     core = 'mihomo',
     corePermissionMode = 'elevated',
@@ -380,11 +391,8 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     throw error
   }
 
+  const candidate = prepared ?? (await prepareCheckedProfile())
   corePath = await customCore.prepareStart(appConfig, corePath, useServiceCore)
-  await generateProfile()
-  if (useServiceCore || detached) {
-    await checkProfile()
-  }
   let serviceCoreRunning = false
   if (useServiceCore) {
     try {
@@ -402,6 +410,9 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
   }
   if (!serviceCoreRunning) {
     await stopCore()
+    await commitProfile(candidate)
+  } else {
+    await attachRunningCore(candidate)
   }
   setMihomoLogSource('out')
   if (tun?.enable && customCore.allowPublicDNS(autoSetDNSMode, controlledMihomoConfig)) {
@@ -536,6 +547,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     })
   }
   child.on('close', async (code, signal) => {
+    if (child === directCoreState.child) markProfileStopped()
     if (!initialized && !spawnError) {
       emitWebhook(
         'lifecycle',
@@ -550,7 +562,9 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     if (!configurationRejected && directCoreState.retry) {
       await appendAppLog(`[Manager]: Try Restart Core\n`)
       directCoreState.retry--
-      await restartCore()
+      await recoverAppliedConfiguration().catch((error) => {
+        void showNotification({ title: '内核恢复失败', body: String(error), variant: 'danger' })
+      })
     } else {
       await stopCore()
     }
@@ -650,6 +664,7 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
 export async function stopCore(force = false): Promise<void> {
   serviceCoreRuntime.pauseAutoResume()
   await customCore.beforeStop()
+  markProfileStopped()
 
   try {
     if (!force) {
@@ -780,16 +795,9 @@ function clearTailscaleAuthNotifications(name?: string): void {
   }
 }
 
-export async function restartCore(): Promise<void> {
-  try {
-    clearTailscaleAuthNotifications()
-    await stopCore()
-    const promises = await startCore()
-    await Promise.all(promises)
-  } catch (e) {
-    emitWebhook('lifecycle', 'core.failed', { reason: 'restart_failed' }, 'failure')
-    void showNotification({ title: '内核启动出错', body: `${e}`, variant: 'danger' })
-  }
+export async function restartCore(force = false): Promise<void> {
+  clearTailscaleAuthNotifications()
+  await applyConfiguration(force)
 }
 
 export async function keepCoreAlive(): Promise<void> {

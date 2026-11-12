@@ -328,6 +328,13 @@ function managerFixture(
       patchAppConfig: async (patch: object) => Object.assign(config, patch)
     },
     './factory': { generateProfile: async () => {}, getRuntimeConfig: async () => runtime },
+    '../custom/profile-builder': { commitProfile: noop, getCommittedProfile: () => undefined },
+    '../custom/config-application': {
+      prepareCheckedProfile: async () => ({ yaml: '', overrides: [] }),
+      attachRunningCore: noop,
+      markProfileApplied: noop,
+      markProfileStopped: noop
+    },
     './profile-check': { checkProfile: async () => {} },
     './startup-chain': chain,
     './startupHook': {
@@ -342,7 +349,7 @@ function managerFixture(
     },
     './network': { recoverDNS: async () => {} },
     './mihomoApi': {
-      getAxios: async () => ({}),
+      getAxios: async () => ({ put: noop }),
       mihomoGroups: async () => ({}),
       mihomoConfig: async () => {
         events.push('check-tun')

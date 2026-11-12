@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -68,11 +68,15 @@ function main(): void {
       if (!data.length) throw new Error(`Empty release artifact: ${file}`)
       return `${createHash('sha256').update(data).digest('hex')}  ${file}`
     })
+    const customNotes = path.join('scripts', 'custom', 'release-notes.md')
     const changelog = [
       `基于 Sparkle ${process.env.UPSTREAM_VERSION ?? version.split('-')[0]}。`,
       `内置 Mihomo ${process.env.MIHOMO_RELEASE_VERSION ?? ''}，内核与应用均从本仓库体系更新。`,
+      existsSync(customNotes) ? readFileSync(customNotes, 'utf8').trim() : '',
       readFileSync('changelog.md', 'utf8').trim()
-    ].join('\n\n')
+    ]
+      .filter(Boolean)
+      .join('\n\n')
     // JSON is valid YAML and keeps multiline release notes lossless.
     writeFileSync('latest.yml', `${JSON.stringify({ version, tag, changelog }, null, 2)}\n`)
     writeFileSync('release-notes.md', `${changelog}\n`)

@@ -276,8 +276,8 @@ export async function setOverride(id: string, ext: 'js' | 'yaml', str: string): 
   return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('setOverride', id, ext, str))
 }
 
-export async function restartCore(): Promise<void> {
-  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('restartCore'))
+export async function restartCore(force = false): Promise<void> {
+  return ipcErrorWrapper(await window.electron.ipcRenderer.invoke('restartCore', force))
 }
 
 export async function stopCore(): Promise<void> {

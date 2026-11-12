@@ -111,7 +111,7 @@ const MihomoCoreCard: React.FC<Props> = (props) => {
                 onPress={async () => {
                   try {
                     setRestarting(true)
-                    await restartCore()
+                    await restartCore(true)
                     await new Promise((resolve) => {
                       setTimeout(resolve, 2000)
                     })
