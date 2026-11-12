@@ -4,6 +4,14 @@ on:
   schedule:
     - cron: '37 1 * * *' # 09:37 Asia/Singapore, once per day
   workflow_dispatch:
+    inputs:
+      macos_runner:
+        description: macOS runner (use the alternate pool if jobs remain queued)
+        type: choice
+        default: macos-15
+        options:
+          - macos-15
+          - macos-26
 
 permissions:
   contents: read
@@ -124,7 +132,7 @@ jobs:
           - os: windows-latest
             arch: x64
             command: build:win
-          - os: macos-15
+          - os: ${{ inputs.macos_runner || 'macos-15' }}
             arch: arm64
             command: build:mac
     runs-on: ${{ matrix.os }}
