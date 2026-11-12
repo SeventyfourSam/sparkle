@@ -1,0 +1,42 @@
+name: Custom Release Queue
+
+on:
+  workflow_run:
+    workflows: [Custom Release]
+    types: [completed]
+  schedule:
+    - cron: '7,22,37,52 * * * *' # Backstop for missed completion events.
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Release run ID; leave empty to inspect the latest release
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: write
+  checks: read
+
+concurrency:
+  group: custom-release-queue
+  cancel-in-progress: false
+
+jobs:
+  continue-queue:
+    if: github.repository == 'SeventyfourSam/sparkle'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Read trusted queue code from the default branch, never from run artifacts.
+      - uses: actions/checkout@v6
+        with:
+          ref: custom
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Continue releases waiting for runner capacity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/custom/release-queue.ts
