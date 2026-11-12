@@ -8,10 +8,10 @@ on:
       macos_runner:
         description: macOS runner (use the alternate pool if jobs remain queued)
         type: choice
-        default: macos-15
+        default: macos-26
         options:
-          - macos-15
           - macos-26
+          - macos-15
 
 permissions:
   contents: read
@@ -132,7 +132,7 @@ jobs:
           - os: windows-latest
             arch: x64
             command: build:win
-          - os: ${{ inputs.macos_runner || 'macos-15' }}
+          - os: ${{ inputs.macos_runner || 'macos-26' }}
             arch: arm64
             command: build:mac
     runs-on: ${{ matrix.os }}
