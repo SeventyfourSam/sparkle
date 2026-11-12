@@ -35,7 +35,7 @@ test(
     skip: !existsSync(binary),
     timeout: 20_000
   },
-  async () => {
+  async (t) => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'sparkle-reload-test-'))
     const echo = net.createServer((socket) => socket.pipe(socket))
     const echoPort = await listen(echo)
@@ -47,7 +47,7 @@ test(
       'bind-address': '127.0.0.1',
       'allow-lan': false,
       mode: 'rule',
-      'log-level': 'silent',
+      'log-level': 'info',
       'udp-fallback': false,
       tun: { enable: false },
       dns: { enable: false },
@@ -60,8 +60,15 @@ test(
     await writeFile(file, original)
     const child = spawn(binary, ['-d', directory, '-f', file], {
       windowsHide: true,
-      stdio: 'ignore'
+      stdio: ['ignore', 'pipe', 'pipe']
     })
+    let output = ''
+    let phase = 'startup'
+    const capture = (data: Buffer): void => {
+      output = (output + data.toString()).slice(-16_384)
+    }
+    child.stdout?.on('data', capture)
+    child.stderr?.on('data', capture)
     const address = `http://127.0.0.1:${controllerPort}`
     let connection: net.Socket | undefined
     try {
@@ -80,21 +87,40 @@ test(
       }
       assert.equal(ready, true, 'isolated Mihomo controller must become ready')
       const pid = child.pid
-      connection = net.connect(mixedPort, '127.0.0.1')
-      connection.setTimeout(3000, () => connection?.destroy(new Error('echo timed out')))
-      await once(connection, 'connect')
-      const handshake = once(connection, 'data')
-      connection.write(
-        `CONNECT 127.0.0.1:${echoPort} HTTP/1.1\r\nHost: 127.0.0.1:${echoPort}\r\n\r\n`
-      )
-      assert.match(String((await handshake)[0]), /200/)
+      // The controller and mixed-port listeners open before OnRunning. Wait
+      // for actual forwarding, not merely /version, before tracking a session.
+      let startupError: unknown
+      for (let i = 0; i < 60; i++) {
+        const socket = net.connect(mixedPort, '127.0.0.1')
+        socket.on('error', () => {})
+        try {
+          await once(socket, 'connect', { signal: AbortSignal.timeout(1000) })
+          const handshake = once(socket, 'data', { signal: AbortSignal.timeout(1000) })
+          socket.write(
+            `CONNECT 127.0.0.1:${echoPort} HTTP/1.1\r\nHost: 127.0.0.1:${echoPort}\r\n\r\n`
+          )
+          assert.match(String((await handshake)[0]), /200/)
+          const warmup = once(socket, 'data', { signal: AbortSignal.timeout(1000) })
+          socket.write('ready')
+          assert.equal(String((await warmup)[0]), 'ready')
+          connection = socket
+          break
+        } catch (error) {
+          startupError = error
+          socket.destroy()
+          await delay(50)
+        }
+      }
+      assert.ok(connection, `forwarding must become ready: ${startupError}`)
       const exchange = async (message: string): Promise<void> => {
-        const response = once(connection!, 'data')
+        assert.equal(connection!.destroyed, false, `connection lost during ${phase}`)
+        const response = once(connection!, 'data', { signal: AbortSignal.timeout(3000) })
         connection!.write(message)
         assert.equal(String((await response)[0]), message)
       }
       await exchange('before reload')
 
+      phase = 'rejected preflight'
       const preflight = load<typeof import('./profile-check')>('profile-check.ts', {
         '../utils/dirs': { mihomoCorePath: () => binary },
         '../core/startup-chain': { createCoreEnvironment: () => ({ ...process.env }) }
@@ -113,6 +139,7 @@ test(
       assert.equal((await fetch(`${address}/configs`)).status, 200)
       await exchange('after rejected preflight')
 
+      phase = 'successful preflight'
       const updated = stringify({ ...config, 'udp-fallback': true })
       await preflight.checkProfile(candidate(updated))
       assert.equal(await readFile(file, 'utf8'), original, 'successful preflight is also read-only')
@@ -126,7 +153,11 @@ test(
       assert.equal(actual['udp-fallback'], true)
       assert.equal(child.pid, pid)
       assert.equal(child.exitCode, null)
+      phase = 'after hot reload'
       await exchange('same connection after reload')
+    } catch (error) {
+      t.diagnostic(`Failed during ${phase}\n${output}`)
+      throw error
     } finally {
       connection?.destroy()
       if (child.exitCode === null && child.signalCode === null) {
