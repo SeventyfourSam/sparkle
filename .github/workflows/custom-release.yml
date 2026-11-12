@@ -139,6 +139,7 @@ jobs:
     timeout-minutes: 45
     env:
       MIHOMO_RELEASE_VERSION: ${{ needs.prepare.outputs.mihomo }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v6
         with:

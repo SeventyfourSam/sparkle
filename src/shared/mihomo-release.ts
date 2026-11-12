@@ -22,16 +22,27 @@ export interface MihomoRelease {
 export type ReleaseRequest = (url: string) => Promise<Buffer>
 
 export async function requestReleaseFile(url: string): Promise<Buffer> {
+  const isGitHubApi = new URL(url).origin === 'https://api.github.com'
+  const token = isGitHubApi && (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)
   const response = await fetch(url, {
     headers: {
       'User-Agent': 'Sparkle',
-      Accept: url.startsWith('https://api.github.com/')
-        ? 'application/vnd.github+json'
-        : 'application/octet-stream'
+      Accept: isGitHubApi ? 'application/vnd.github+json' : 'application/octet-stream',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
     signal: AbortSignal.timeout(120_000)
   })
-  if (!response.ok) throw new Error(`Download failed: HTTP ${response.status} (${url})`)
+  if (!response.ok) {
+    const detail = isGitHubApi
+      ? await response
+          .json()
+          .then((data: { message?: string }) => data.message || '')
+          .catch(() => '')
+      : ''
+    throw new Error(
+      `Download failed: HTTP ${response.status} (${url})${detail ? `: ${detail}` : ''}`
+    )
+  }
   return Buffer.from(await response.arrayBuffer())
 }
 

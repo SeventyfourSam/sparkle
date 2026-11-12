@@ -7,6 +7,7 @@ import {
   downloadMihomoRelease,
   getMihomoRelease,
   MIHOMO_RELEASE_API,
+  requestReleaseFile,
   selectMihomoRelease,
   verifyMihomoChecksum
 } from './mihomo-release'
@@ -22,6 +23,54 @@ const metadata = {
 }
 const checksum = (data: Buffer, name: string): string =>
   `${createHash('sha256').update(data).digest('hex')}  ${name}\n`
+
+test('release downloads authenticate only the GitHub API, never assets or lookalike hosts', async (t) => {
+  const previous = { GH_TOKEN: process.env.GH_TOKEN, GITHUB_TOKEN: process.env.GITHUB_TOKEN }
+  t.after(() => {
+    for (const key of ['GH_TOKEN', 'GITHUB_TOKEN'] as const) {
+      if (previous[key] === undefined) delete process.env[key]
+      else process.env[key] = previous[key]
+    }
+  })
+  const requests: { url: string; headers: Headers }[] = []
+  t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    requests.push({ url, headers: new Headers(init.headers) })
+    return new Response('download')
+  })
+  process.env.GH_TOKEN = 'test-actions-token'
+  process.env.GITHUB_TOKEN = 'test-fallback-token'
+  await requestReleaseFile(MIHOMO_RELEASE_API)
+  assert.equal(requests.at(-1)?.headers.get('authorization'), 'Bearer test-actions-token')
+  for (const url of [
+    `https://github.com/SeventyfourSam/mihomo/releases/download/${version}/${macAsset}`,
+    'https://api.github.com.example.com/releases',
+    'http://api.github.com/releases'
+  ]) {
+    await requestReleaseFile(url)
+    assert.equal(requests.at(-1)?.headers.has('authorization'), false)
+  }
+  delete process.env.GH_TOKEN
+  await requestReleaseFile(MIHOMO_RELEASE_API)
+  assert.equal(requests.at(-1)?.headers.get('authorization'), 'Bearer test-fallback-token')
+  delete process.env.GITHUB_TOKEN
+  await requestReleaseFile(MIHOMO_RELEASE_API)
+  assert.equal(requests.at(-1)?.headers.has('authorization'), false)
+})
+
+test('GitHub API failures preserve the diagnostic message', async (t) => {
+  t.mock.method(
+    globalThis,
+    'fetch',
+    async () =>
+      new Response(
+        JSON.stringify({
+          message: 'API rate limit exceeded'
+        }),
+        { status: 403 }
+      )
+  )
+  await assert.rejects(requestReleaseFile(MIHOMO_RELEASE_API), /HTTP 403.*API rate limit exceeded/)
+})
 
 test('uses the custom stable Release API and the published Windows/macOS asset names', async () => {
   const release = await getMihomoRelease('win32', 'x64', async (url) => {
