@@ -37,7 +37,18 @@ test(
   },
   async (t) => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'sparkle-reload-test-'))
-    const echo = net.createServer((socket) => socket.pipe(socket))
+    const echoSockets = new Set<net.Socket>()
+    let tracking = false
+    let shuttingDown = false
+    let echoFailure: Error | undefined
+    const echo = net.createServer((socket) => {
+      echoSockets.add(socket)
+      socket.once('close', () => echoSockets.delete(socket))
+      socket.on('error', (error) => {
+        if (tracking && !shuttingDown) echoFailure = error
+      })
+      socket.pipe(socket)
+    })
     const echoPort = await listen(echo)
     const controllerPort = await availablePort()
     const mixedPort = await availablePort()
@@ -112,6 +123,7 @@ test(
         }
       }
       assert.ok(connection, `forwarding must become ready: ${startupError}`)
+      tracking = true
       const exchange = async (message: string): Promise<void> => {
         assert.equal(connection!.destroyed, false, `connection lost during ${phase}`)
         const response = once(connection!, 'data', { signal: AbortSignal.timeout(3000) })
@@ -155,11 +167,14 @@ test(
       assert.equal(child.exitCode, null)
       phase = 'after hot reload'
       await exchange('same connection after reload')
+      assert.equal(echoFailure, undefined, 'the tracked echo connection must remain healthy')
     } catch (error) {
       t.diagnostic(`Failed during ${phase}\n${output}`)
       throw error
     } finally {
+      shuttingDown = true
       connection?.destroy()
+      for (const socket of echoSockets) socket.destroy()
       if (child.exitCode === null && child.signalCode === null) {
         const exited = once(child, 'exit')
         child.kill()
