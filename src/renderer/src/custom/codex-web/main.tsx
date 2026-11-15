@@ -503,6 +503,7 @@ function App(): React.JSX.Element {
   const [dismissCommandSuggestions, setDismissCommandSuggestions] = useState(false)
   const [commandError, setCommandError] = useState('')
   const [creating, setCreating] = useState(false)
+  const [startingCodex, setStartingCodex] = useState(false)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [createError, setCreateError] = useState('')
   const [newInstance, setNewInstance] = useState('')
@@ -673,6 +674,7 @@ function App(): React.JSX.Element {
     if (!createDialog.current?.open) return
     if (!instances.some((item) => item.ready && item.id === newInstance)) {
       setNewInstance(instances.find((item) => item.ready)?.id || '')
+      setHistoryLoading(false)
     }
   }, [instances, newInstance])
 
@@ -710,15 +712,35 @@ function App(): React.JSX.Element {
     setCreateOpen(true)
     createDialog.current?.showModal()
   }
+  const prepareCreate = async (cwd: string): Promise<void> => {
+    setNewCwd(cwd)
+    setHistoryLoading(false)
+    setCreateError('')
+    setChoosingDirectory(false)
+    setStartingCodex(true)
+    try {
+      const result = await command('ensure', {
+        cwd,
+        ...(newInstance ? { instanceId: newInstance } : {})
+      })
+      setNewInstance(result.instanceId)
+      setHistoryLoading(true)
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setStartingCodex(false)
+    }
+  }
   const create = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
-    if (!connected || !newInstance || !newCwd || creating || historyLoading) return
+    if (!connected || !newCwd || creating || startingCodex || historyLoading) return
+    if (!newInstance) return prepareCreate(newCwd)
     const instanceId = newInstance
     setCreating(true)
     setCreateError('')
     try {
       const result = await command('create', { instanceId, cwd: newCwd })
-      select({ instanceId, threadId: result.thread.id })
+      select({ instanceId: result.instanceId || instanceId, threadId: result.thread.id })
       createDialog.current?.close()
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : String(error))
@@ -849,6 +871,7 @@ function App(): React.JSX.Element {
     }),
     [online, conversation.questionAnswers, activeTurn?.id]
   )
+  const createBusy = creating || startingCodex
   return (
     <ContentScope.Provider value={linkScope}>
       <HistoryContext.Provider value={historyContext}>
@@ -1319,10 +1342,10 @@ function App(): React.JSX.Element {
             className="create-dialog"
             onClose={() => setCreateOpen(false)}
             onCancel={(event) => {
-              if (creating) event.preventDefault()
+              if (createBusy) event.preventDefault()
             }}
             onClick={(event) => {
-              if (!creating && event.target === event.currentTarget) createDialog.current?.close()
+              if (!createBusy && event.target === event.currentTarget) createDialog.current?.close()
             }}
           >
             {choosingDirectory && createOpen ? (
@@ -1338,12 +1361,7 @@ function App(): React.JSX.Element {
                     )
                   )
                 ]}
-                onSelect={(path) => {
-                  setNewCwd(path)
-                  setHistoryLoading(true)
-                  setCreateError('')
-                  setChoosingDirectory(false)
-                }}
+                onSelect={(path) => void prepareCreate(path)}
                 onCancel={() => createDialog.current?.close()}
               />
             ) : !choosingDirectory && createOpen ? (
@@ -1357,7 +1375,7 @@ function App(): React.JSX.Element {
                     type="button"
                     className="icon-button"
                     aria-label="关闭新建会话"
-                    disabled={creating}
+                    disabled={createBusy}
                     onClick={() => createDialog.current?.close()}
                   >
                     <Icon name="close" />
@@ -1368,7 +1386,7 @@ function App(): React.JSX.Element {
                   <button
                     type="button"
                     className="selected-directory"
-                    disabled={creating}
+                    disabled={createBusy}
                     onClick={() => setChoosingDirectory(true)}
                   >
                     <Icon name="folder" size={19} />
@@ -1381,14 +1399,16 @@ function App(): React.JSX.Element {
                   <select
                     aria-label="Codex 服务"
                     value={newInstance}
-                    disabled={creating || !instances.some((item) => item.ready)}
+                    disabled={createBusy || !instances.some((item) => item.ready)}
                     onChange={(event) => {
                       setHistoryLoading(true)
                       setNewInstance(event.target.value)
                     }}
                   >
                     {!instances.some((item) => item.ready) && (
-                      <option value="">等待 Codex 接入</option>
+                      <option value="">
+                        {startingCodex ? '正在启动 Codex…' : '自动启动本机 Codex'}
+                      </option>
                     )}
                     {instances
                       .filter((item) => item.ready)
@@ -1400,9 +1420,13 @@ function App(): React.JSX.Element {
                   </select>
                 </label>
                 {!instances.some((item) => item.ready) && (
-                  <p className="create-note">请先启动已连接 Sparkle 的 Codex，再创建会话。</p>
+                  <p className="create-note">
+                    {startingCodex
+                      ? '正在启动并等待 Codex 接入…'
+                      : '没有可用服务时，自动在所选目录启动本机 Codex。'}
+                  </p>
                 )}
-                {connected && newInstance && newCwd && (
+                {connected && newInstance && newCwd && !startingCodex && (
                   <SessionHistory
                     key={`${newInstance}:${newCwd}`}
                     command={command}
@@ -1422,7 +1446,7 @@ function App(): React.JSX.Element {
                   <button
                     type="button"
                     className="button secondary"
-                    disabled={creating}
+                    disabled={createBusy}
                     onClick={() => createDialog.current?.close()}
                   >
                     取消
@@ -1430,15 +1454,17 @@ function App(): React.JSX.Element {
                   <button
                     type="submit"
                     className="button primary"
-                    disabled={
-                      !connected ||
-                      creating ||
-                      historyLoading ||
-                      !newCwd ||
-                      !instances.some((item) => item.ready && item.id === newInstance)
-                    }
+                    disabled={!connected || createBusy || historyLoading || !newCwd}
                   >
-                    {creating ? '正在创建…' : historyLoading ? '正在查询历史…' : '创建会话'}
+                    {startingCodex
+                      ? '正在启动 Codex…'
+                      : creating
+                        ? '正在创建…'
+                        : historyLoading
+                          ? '正在查询历史…'
+                          : newInstance
+                            ? '创建会话'
+                            : '启动 Codex'}
                     <Icon name="arrow" size={16} />
                   </button>
                 </div>

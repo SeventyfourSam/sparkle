@@ -11,6 +11,7 @@ import { previewItem } from '../../../shared/codex-web-history'
 import { serveProjectFile } from './files'
 import { readSessions, sessionId } from './sessions'
 import { AsyncQuestionState } from './questions'
+import { CodexLauncher, type CodexCommand } from './launcher'
 import { threadSettingsPatch, type CodexWebModel } from '../../../shared/codex-web-models'
 import { parseCodexWebCommand } from '../../../shared/codex-web-commands'
 import {
@@ -74,6 +75,7 @@ export class CodexGateway {
   private refreshTimer?: NodeJS.Timeout
   private refreshing = false
   private heartbeat?: NodeJS.Timeout
+  private launcher: CodexLauncher
 
   constructor(
     private readonly options: {
@@ -85,8 +87,17 @@ export class CodexGateway {
       offlineRetentionMs?: number
       onChange?: () => void
       log?: (text: string) => void
+      codexCommand?: () => Promise<CodexCommand>
+      codexStartupTimeoutMs?: number
     }
-  ) {}
+  ) {
+    this.launcher = new CodexLauncher({
+      instances: () => this.snapshot(),
+      command: options.codexCommand,
+      timeoutMs: options.codexStartupTimeoutMs,
+      log: options.log
+    })
+  }
 
   snapshot(): CodexInstance[] {
     return [...this.instances.values()].map(
@@ -259,6 +270,7 @@ export class CodexGateway {
   private async close(): Promise<void> {
     clearInterval(this.refreshTimer)
     clearInterval(this.heartbeat)
+    await this.launcher.stop()
     for (const ws of this.wss.clients) ws.terminate()
     for (const instance of this.instances.values()) this.rejectCalls(instance)
     this.instances.clear()
@@ -953,7 +965,17 @@ export class CodexGateway {
         message.path,
         [...this.instances.values()].flatMap((item) => item.threads.map((thread) => thread.cwd))
       )
-    const instance = this.getInstance(String(message.instanceId))
+    if (message.action === 'ensure') {
+      const cwd = await workingDirectory(message.cwd)
+      const instanceId = await this.launcher.ensure(cwd, this.ports().port, message.instanceId)
+      this.changed()
+      return { instanceId }
+    }
+    const instance = this.getInstance(
+      message.action === 'create' && !message.instanceId
+        ? await this.launcher.ensure(await workingDirectory(message.cwd), this.ports().port)
+        : String(message.instanceId)
+    )
     if (message.action === 'sessions') {
       const page = await readSessions(message, (method, params) =>
         this.call(instance, method, params)
@@ -995,7 +1017,7 @@ export class CodexGateway {
       instance.subscriptions.set(thread.id, Promise.resolve({ ...result, thread }))
       instance.threads = [...instance.threads.filter((item) => item.id !== thread.id), thread]
       this.changed()
-      return { thread }
+      return { thread, instanceId: instance.id }
     }
     if (message.action === 'respond') {
       const pending = instance.requests.get(String(message.key))
