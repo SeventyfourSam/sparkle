@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -155,7 +155,7 @@ test('two browsers start one Codex with the selected directory and actual gatewa
       '-c',
       `web_server_port=${f.port}`
     ])
-    assert.equal((await f.starts())[0].cwd, f.directory)
+    assert.equal(await realpath((await f.starts())[0].cwd), await realpath(f.directory))
     assert.equal(
       (await a('sessions', { instanceId: first.result.instanceId, cwd: f.directory })).error,
       undefined
