@@ -31,9 +31,7 @@ export function releaseArtifacts(version: string): string[] {
   return [
     `sparkle-windows-${version}-x64-setup.exe`,
     `sparkle-windows-${version}-x64-portable.7z`,
-    `sparkle-macos-${version}-arm64.pkg`,
-    `sparkle-codex-web-${version}-node.tar.gz`,
-    `sparkle-codex-web-${version}-macos-arm64.tar.gz`
+    `sparkle-macos-${version}-arm64.pkg`
   ]
 }
 

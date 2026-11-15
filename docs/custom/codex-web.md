@@ -13,8 +13,6 @@ Sparkle 启动时自动运行服务。在「应用设置 → Codex Web」只提�
 
 在项目目录中也可以不启动 Sparkle，单独运行 `pnpm run serve:codex-web`。该命令使用默认两个端口；需要修改时可传入 `--port` 和 `--web-port`。关闭命令即可停止服务。网页必须先由 `electron-vite build` 构建到 `out/renderer`。
 
-Release 同时提供无需源码的独立部署包：Mac ARM64 包自带 Node，通用包适合已有 Node 24+ 的环境，均内置网页、无需安装 npm 依赖。详见[独立部署说明](./codex-web-standalone.md)。源码可运行 `pnpm build:codex-web` 构建通用包；原生 Mac ARM64 环境加 `--macos-arm64` 可同时构建自带运行时的包。
-
 ## Codex 侧由用户手动配置
 
 Sparkle 不读取、写入、检测或迁移 Codex 的配置文件，也不提供配置目录选择或自动写入按钮。请用户自行在 Codex 的 `config.toml` 顶层配置接入端口，例如：
