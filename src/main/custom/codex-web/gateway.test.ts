@@ -8,6 +8,11 @@ import { test } from 'node:test'
 import { WebSocket } from 'ws'
 import { CodexGateway } from './gateway'
 import type { CodexRecord } from '../../../shared/codex-web'
+import {
+  parseQuestionReply,
+  questionId,
+  serializeQuestionReplies
+} from '../../../shared/codex-web-questions'
 
 function inbox(socket: WebSocket): {
   messages: CodexRecord[]
@@ -58,6 +63,8 @@ async function fixture(
     rejectDelete?: boolean
     unsupportedDelete?: boolean
     deferThreadReads?: boolean
+    historyItems?: CodexRecord[]
+    rejectAnswers?: boolean
   } = {}
 ): Promise<{
   gateway: CodexGateway
@@ -109,6 +116,16 @@ async function fixture(
   backend.on('message', (bytes) => {
     const message = JSON.parse(bytes.toString())
     if (!message.method || message.id === undefined) return
+    if (
+      options.rejectAnswers &&
+      ['turn/start', 'turn/steer'].includes(message.method) &&
+      message.params.input?.[0]?.text.startsWith('<send_user_message_question_reply>')
+    ) {
+      backend.send(
+        JSON.stringify({ id: message.id, error: { code: -32600, message: 'answer refused' } })
+      )
+      return
+    }
     if (options.deferThreadReads && message.method === 'thread/read') return
     if (message.method === 'thread/delete') {
       if (options.rejectDelete || options.unsupportedDelete) {
@@ -312,7 +329,9 @@ async function fixture(
       }
     if (message.method === 'thread/items/list')
       result = {
-        data: [{ turnId: 'turn-a', item: { id: 'item-a', type: 'agentMessage', text: 'Hello' } }],
+        data: (options.historyItems || [{ id: 'item-a', type: 'agentMessage', text: 'Hello' }]).map(
+          (item) => ({ turnId: 'turn-a', item })
+        ),
         nextCursor: null
       }
     if (message.method === 'thread/items/read')
@@ -320,7 +339,7 @@ async function fixture(
         data: [
           {
             turnId: message.params.turnId,
-            item: {
+            item: options.historyItems?.find((item) => item.id === message.params.itemIds[0]) || {
               id: message.params.itemIds[0],
               type: 'commandExecution',
               aggregatedOutput: 'persisted output'
@@ -1099,6 +1118,131 @@ test('approvals preserve request ID types and terminal resolutions prevent dupli
     assert.match(
       (await f.action('respond', { key: request.key, decision: 'accept' })).error,
       /已处理/
+    )
+  } finally {
+    await f.close()
+  }
+})
+
+test('async question options stay interactive in live events and answers steer through the native envelope once', async () => {
+  const f = await fixture()
+  const item = {
+    id: 'ask-live',
+    type: 'agentMessage',
+    delivery: 'async',
+    text: '现在方便测试吗？\n- 方便\n- 暂不方便',
+    questions: [{ title: '现在方便测试吗？', options: ['方便', '暂不方便'] }]
+  }
+  try {
+    await f.action('watch')
+    f.backend.send(
+      JSON.stringify({
+        method: 'item/completed',
+        params: { threadId: 'thread-a', turnId: 'turn-a', item }
+      })
+    )
+    const event = await f.web.wait(
+      (m) => m.method === 'item/completed' && m.params.item.id === item.id
+    )
+    assert.deepEqual(event.params.item.questions, item.questions)
+    assert.equal(event.params.item.delivery, 'async')
+    const params = {
+      turnId: 'turn-a',
+      itemId: item.id,
+      expectedTurnId: 'turn-a',
+      answers: [{ index: 0, answer: '暂不方便' }]
+    }
+    assert.equal((await f.action('answer', params)).error, undefined)
+    const request = await f.rpc.wait((m) => m.method === 'turn/steer')
+    assert.equal(request.params.expectedTurnId, 'turn-a')
+    assert.deepEqual(parseQuestionReply(request.params.input[0].text), [
+      {
+        questionItemId: questionId(item.id, 0),
+        question: item.questions[0].title,
+        answer: '暂不方便'
+      }
+    ])
+    await f.web.wait((m) => m.type === 'questionAnswers' && m.answers[questionId(item.id, 0)])
+    assert.match((await f.action('answer', params)).error, /已回答/)
+    assert.equal(
+      f.rpc.messages.some((m) => m.method === 'turn/start'),
+      false
+    )
+  } finally {
+    await f.close()
+  }
+})
+
+test('async question replies recover from bounded history and terminal answers disable the matching question', async () => {
+  const item = {
+    id: 'ask-history',
+    type: 'agentMessage',
+    delivery: 'async',
+    text: 'Which?',
+    questions: [{ title: 'Which?', options: ['A', 'B'] }]
+  }
+  const text = serializeQuestionReplies([
+    { questionItemId: questionId(item.id, 0), question: 'Which?', answer: 'B' }
+  ])
+  const f = await fixture({
+    historyItems: [item, { id: 'answered', type: 'userMessage', content: [{ type: 'text', text }] }]
+  })
+  try {
+    await f.action('watch')
+    const history = await f.web.wait((m) => m.type === 'history')
+    assert.equal(history.questionAnswers[questionId(item.id, 0)], true)
+    const question = history.turns
+      .flatMap((turn: CodexRecord) => turn.items)
+      .find((entry: CodexRecord) => entry.id === item.id)
+    assert.deepEqual(question.questions, item.questions)
+    assert.match(
+      (
+        await f.action('answer', {
+          turnId: 'turn-a',
+          itemId: item.id,
+          answers: [{ index: 0, answer: 'A' }]
+        })
+      ).error,
+      /已回答/
+    )
+    assert.equal(
+      f.rpc.messages.some((m) => m.method === 'turn/start'),
+      false
+    )
+  } finally {
+    await f.close()
+  }
+})
+
+test('failed async answer delivery retains the question for retry and free text is never parsed as a slash command', async () => {
+  const item = {
+    id: 'ask-free',
+    type: 'agentMessage',
+    delivery: 'async',
+    text: 'Answer?',
+    questions: [{ title: 'Answer?', options: null }]
+  }
+  const options = { historyItems: [item], rejectAnswers: true }
+  const f = await fixture(options)
+  try {
+    await f.action('watch')
+    const params = {
+      turnId: 'turn-a',
+      itemId: item.id,
+      answers: [{ index: 0, answer: '/delete is my answer' }]
+    }
+    assert.match((await f.action('answer', params)).error, /answer refused/)
+    options.rejectAnswers = false
+    assert.equal((await f.action('answer', params)).error, undefined)
+    const sent = await f.rpc.wait((m) => m.method === 'turn/start')
+    assert.equal(parseQuestionReply(sent.params.input[0].text)?.[0].answer, '/delete is my answer')
+    assert.equal(
+      f.rpc.messages.some((m) => m.method === 'thread/delete'),
+      false
+    )
+    assert.match(
+      (await f.action('answer', { ...params, itemId: 'no-question' })).error,
+      /没有可交互/
     )
   } finally {
     await f.close()

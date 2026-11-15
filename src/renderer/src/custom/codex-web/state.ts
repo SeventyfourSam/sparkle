@@ -21,6 +21,7 @@ export interface Conversation {
   diff?: string
   diffAvailable?: boolean
   historyNotice?: string
+  questionAnswers?: Record<string, boolean>
   browsingHistory?: boolean
   windowTrimmed?: boolean
   error?: string

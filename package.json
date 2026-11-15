@@ -21,6 +21,8 @@
     "test:custom": "tsx --test scripts/custom/release.test.ts scripts/custom/release-queue.test.ts scripts/custom/prepare.test.ts src/shared/mihomo-release.test.ts src/main/core/custom-config.test.ts src/main/custom/updates.test.ts src/main/custom/config-application.test.ts src/main/custom/config-reload.integration.test.ts src/main/core/local-core-startup.test.ts src/main/core/local-core.test.ts src/main/sys/dns-helper.test.ts src/main/custom/codex-web/*.test.ts",
     "test:codex-web": "tsx --test src/main/custom/codex-web/*.test.ts",
     "serve:codex-web": "tsx scripts/custom/codex-web-standalone.mts",
+    "build:codex-web": "tsx scripts/custom/codex-web-package.mts",
+    "test:codex-web-package": "tsx scripts/custom/codex-web-package-smoke.mts",
     "updater": "node scripts/updater.ts",
     "checksum": "node scripts/checksum.ts",
     "telegram": "node scripts/telegram.ts",

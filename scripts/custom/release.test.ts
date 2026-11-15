@@ -19,7 +19,7 @@ test('release versions increase custom revisions and start at one for a new upst
   assert.throws(() => nextReleaseVersion('1.27.0-beta.1', '1.27.0', []))
 })
 
-test('the published update manifest names the tested version and all three platform packages', async (t) => {
+test('the published update manifest checksums desktop and standalone web packages', async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'sparkle-release-test-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const version = '1.26.10-custom.3'
@@ -38,7 +38,7 @@ test('the published update manifest names the tested version and all three platf
   assert.equal(manifest.version, version)
   assert.equal(manifest.tag, `v${version}`)
   assert.match(manifest.changelog, /with "quotes" and 中文/)
-  assert.equal((await readFile(path.join(dir, 'SHA256SUMS'), 'utf8')).trim().split('\n').length, 3)
+  assert.equal((await readFile(path.join(dir, 'SHA256SUMS'), 'utf8')).trim().split('\n').length, 5)
   await mkdir(path.join(dir, 'scripts', 'custom'), { recursive: true })
   await writeFile(
     path.join(dir, 'scripts', 'custom', 'release-notes.md'),

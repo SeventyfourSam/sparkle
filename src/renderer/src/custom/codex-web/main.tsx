@@ -16,6 +16,8 @@ import { SessionStatus } from './status-line'
 import { ModelSettings } from './model-settings'
 import { useComposerEditing } from './composer-editing'
 import { usePageGestures } from './page-gestures'
+import { AsyncQuestionContext, AsyncQuestions } from './async-questions'
+import { asyncQuestions } from '../../../../shared/codex-web-questions'
 import {
   ContentBase,
   ContentLink,
@@ -184,7 +186,7 @@ const Item = memo(function Item({ item }: { item: CodexRecord }): React.JSX.Elem
           <Icon name="spark" size={14} />
           Codex{item.phase === 'commentary' && <span>进展</span>}
         </div>
-        <Mark>{item.text || ''}</Mark>
+        {asyncQuestions(item) ? <AsyncQuestions item={item} /> : <Mark>{item.text || ''}</Mark>}
         {item.webDeferred && (
           <LazyDetails
             item={item}
@@ -568,6 +570,10 @@ function App(): React.JSX.Element {
       return
     }
     if (!selected || message.instanceId !== selected.instanceId) return
+    if (message.type === 'questionAnswers' && message.threadId === selected.threadId) {
+      setConversation((old) => ({ ...old, questionAnswers: message.answers }))
+      return
+    }
     if (message.type === 'history' && message.threadId === selected.threadId) {
       hydrating.current = false
       setConversation((old) => {
@@ -584,6 +590,7 @@ function App(): React.JSX.Element {
           plan: message.plan,
           diffAvailable: message.diffAvailable,
           historyNotice: message.historyNotice,
+          questionAnswers: message.questionAnswers,
           browsingHistory: false,
           windowTrimmed: false,
           loading: false,
@@ -834,6 +841,14 @@ function App(): React.JSX.Element {
     modelSettingsOpen ||
     showCommandHelp ||
     !!commandError
+  const questionContext = useMemo(
+    () => ({
+      online,
+      answers: conversation.questionAnswers || {},
+      activeTurnId: activeTurn?.id
+    }),
+    [online, conversation.questionAnswers, activeTurn?.id]
+  )
   return (
     <ContentScope.Provider value={linkScope}>
       <HistoryContext.Provider value={historyContext}>
@@ -1022,7 +1037,9 @@ function App(): React.JSX.Element {
                             </div>
                           )}
                           <div data-history-spacer="top" aria-hidden="true" />
-                          <ConversationItems turns={historyWindow.turns} />
+                          <AsyncQuestionContext.Provider value={questionContext}>
+                            <ConversationItems turns={historyWindow.turns} />
+                          </AsyncQuestionContext.Provider>
                           <div data-history-spacer="bottom" aria-hidden="true" />
                           {conversation.plan && (
                             <DeferredSection

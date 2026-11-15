@@ -156,6 +156,11 @@ jobs:
           file extra/files/sparkle-dns-helper | grep -q 'Mach-O 64-bit executable arm64'
           extra/files/sparkle-dns-helper self-test --json
       - run: pnpm ${{ matrix.command }} --${{ matrix.arch }}
+      - name: Build and verify standalone Codex Web packages
+        if: runner.os == 'macOS'
+        run: |
+          pnpm build:codex-web --macos-arm64
+          pnpm test:codex-web-package
       - name: Add portable flag
         if: runner.os == 'Windows'
         shell: pwsh
@@ -169,6 +174,7 @@ jobs:
             dist/sparkle*setup.exe
             dist/sparkle*portable.7z
             dist/sparkle*.pkg
+            dist/sparkle-codex-web-*.tar.gz
           if-no-files-found: error
 
   publish:

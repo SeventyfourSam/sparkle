@@ -1,4 +1,5 @@
 import type { CodexRecord } from './codex-web'
+import { asyncQuestions, formatQuestionReplies, itemQuestionReplies } from './codex-web-questions'
 
 export const HISTORY_WINDOW = 10
 export const HISTORY_TEXT_LIMIT = 12000
@@ -13,6 +14,7 @@ export function visibleNarrative(item: CodexRecord): boolean {
     )
   if (item.type === 'userMessage') return !!item.content?.length
   if (item.type === 'contextCompaction') return true
+  if (asyncQuestions(item)) return true
   return typeof item.text === 'string' && !!item.text.trim()
 }
 
@@ -27,6 +29,11 @@ export function previewItem(item: CodexRecord, turnId: string): CodexRecord {
     result.text = item.text.slice(0, HISTORY_TEXT_LIMIT)
     if (result.text.length < item.text.length) result.webDeferred = true
   }
+  const questions = asyncQuestions(item)
+  if (questions) {
+    result.delivery = 'async'
+    result.questions = questions
+  }
   if (item.type === 'reasoning') {
     result.summary = [(item.summary || []).join('\n').slice(0, 2000)]
     result.content = []
@@ -34,6 +41,14 @@ export function previewItem(item: CodexRecord, turnId: string): CodexRecord {
     result.webDeferred = true
   }
   if (item.type === 'userMessage') {
+    const replies = itemQuestionReplies(item)
+    if (replies.length) {
+      result.webQuestionReplyIds = replies.map((reply) => reply.questionItemId)
+      const text = formatQuestionReplies(replies)
+      result.content = [{ type: 'text', text: text.slice(0, HISTORY_TEXT_LIMIT) }]
+      if (text.length > HISTORY_TEXT_LIMIT) result.webDeferred = true
+      return result
+    }
     let remaining = HISTORY_TEXT_LIMIT
     result.content = (item.content || []).map((input: CodexRecord) => {
       if (input.type !== 'text') return { type: input.type, name: input.name || '附件' }
@@ -60,12 +75,18 @@ export function boundedDetail(item: CodexRecord, turnId: string): CodexRecord {
   for (const key of ['summary', 'content'])
     if (item.type === 'reasoning' && Array.isArray(result[key]))
       result[key] = result[key].map((text: string) => clip(String(text)))
-  if (item.type === 'userMessage' && Array.isArray(item.content))
-    result.content = item.content.map((input: CodexRecord) =>
-      input.type === 'text'
-        ? { type: 'text', text: clip(String(input.text || '')) }
-        : { type: input.type, name: input.name || '附件' }
-    )
+  if (item.type === 'userMessage' && Array.isArray(item.content)) {
+    const replies = itemQuestionReplies(item)
+    if (replies.length) {
+      result.webQuestionReplyIds = replies.map((reply) => reply.questionItemId)
+      result.content = [{ type: 'text', text: clip(formatQuestionReplies(replies)) }]
+    } else
+      result.content = item.content.map((input: CodexRecord) =>
+        input.type === 'text'
+          ? { type: 'text', text: clip(String(input.text || '')) }
+          : { type: input.type, name: input.name || '附件' }
+      )
+  }
   if (Array.isArray(item.changes))
     result.changes = item.changes
       .slice(0, 100)

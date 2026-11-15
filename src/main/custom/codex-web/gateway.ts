@@ -10,6 +10,7 @@ import { anchoredHistory } from './history-pages'
 import { previewItem } from '../../../shared/codex-web-history'
 import { serveProjectFile } from './files'
 import { readSessions, sessionId } from './sessions'
+import { AsyncQuestionState } from './questions'
 import { threadSettingsPatch, type CodexWebModel } from '../../../shared/codex-web-models'
 import { parseCodexWebCommand } from '../../../shared/codex-web-commands'
 import {
@@ -36,6 +37,7 @@ interface Instance extends CodexInstance {
   rateLimits?: CodexRecord
   modelCatalogs: Map<string, Promise<CodexWebModel[]>>
   liveItems: LiveItemCache
+  questions: AsyncQuestionState
 }
 interface Browser {
   socket: WebSocket
@@ -343,7 +345,8 @@ export class CodexGateway {
       deletedThreads: new Set(),
       threadState: new Map(),
       modelCatalogs: new Map(),
-      liveItems: new LiveItemCache()
+      liveItems: new LiveItemCache(),
+      questions: new AsyncQuestionState()
     }
     this.instances.set(id, instance)
     this.broadcastRequests(instance)
@@ -413,6 +416,8 @@ export class CodexGateway {
       return
     }
     if (instance.deletedThreads.has(params.threadId)) return
+    if (typeof params.threadId === 'string' && params.item)
+      this.observeQuestionItem(instance, params.threadId, params.turnId, params.item)
     if (typeof params.threadId === 'string') {
       const state = instance.threadState.get(params.threadId) || {}
       if (message.method === 'thread/tokenUsage/updated') state.tokenUsage = params.tokenUsage
@@ -567,6 +572,29 @@ export class CodexGateway {
       requests: [...instance.requests.values()]
     })
   }
+  private questionAnswers(instance: Instance, threadId: string): void {
+    for (const browser of this.browsers)
+      if (browser.watching?.instanceId === instance.id && browser.watching.threadId === threadId)
+        this.send(browser.socket, {
+          type: 'questionAnswers',
+          instanceId: instance.id,
+          threadId,
+          answers: instance.questions.snapshot(threadId)
+        })
+  }
+  private observeQuestionItem(
+    instance: Instance,
+    threadId: string,
+    turnId: string,
+    item: CodexRecord
+  ): void {
+    if (instance.questions.observe(threadId, turnId, item)) this.questionAnswers(instance, threadId)
+  }
+  private observeQuestionHistory(instance: Instance, threadId: string, turns: CodexRecord[]): void {
+    for (const turn of turns)
+      for (const item of turn.items || [])
+        this.observeQuestionItem(instance, threadId, turn.id, item)
+  }
   private forgetThread(instance: Instance, threadId: string): void {
     if (instance.deletedThreads.has(threadId)) return
     instance.deletedThreads.add(threadId)
@@ -576,6 +604,7 @@ export class CodexGateway {
     instance.subscriptions.delete(threadId)
     instance.createdThreads.delete(threadId)
     instance.threadState.delete(threadId)
+    instance.questions.forget(threadId)
     for (const [key, request] of instance.requests)
       if (request.params.threadId === threadId) instance.requests.delete(key)
     for (const browser of this.browsers)
@@ -855,8 +884,10 @@ export class CodexGateway {
       const history = instance.createdThreads.get(threadId)?.empty
         ? { data: [], nextCursor: null }
         : await recentHistory((method, params) => this.call(instance, method, params), threadId)
+      this.observeQuestionHistory(instance, threadId, history.data)
       const runtime = instance.threadState.get(threadId)
       const payload = {
+        questionAnswers: instance.questions.snapshot(threadId),
         tokenUsage: runtime?.tokenUsage,
         goal: runtime?.goal,
         plan: runtime?.plan,
@@ -982,6 +1013,50 @@ export class CodexGateway {
       throw new Error('请先打开对应会话')
     const threadId = String(message.threadId)
     if (!instance.subscriptions.has(threadId)) throw new Error('请先重新同步会话')
+    if (message.action === 'answer') {
+      if (
+        typeof message.turnId !== 'string' ||
+        !message.turnId ||
+        message.turnId.length > 200 ||
+        typeof message.itemId !== 'string' ||
+        !message.itemId ||
+        message.itemId.length > 300 ||
+        (message.expectedTurnId !== undefined &&
+          (typeof message.expectedTurnId !== 'string' ||
+            !message.expectedTurnId ||
+            message.expectedTurnId.length > 200))
+      )
+        throw new Error('问题位置无效，请重新同步')
+      let questions = instance.questions.find(threadId, message.turnId, message.itemId)
+      if (!questions) {
+        const result = await this.call(instance, 'thread/items/read', {
+          threadId,
+          turnId: message.turnId,
+          itemIds: [message.itemId]
+        })
+        const item = result.data?.find(
+          (entry: CodexRecord) =>
+            entry.turnId === message.turnId && entry.item?.id === message.itemId
+        )?.item
+        if (item) this.observeQuestionItem(instance, threadId, message.turnId, item)
+        questions = instance.questions.find(threadId, message.turnId, message.itemId)
+      }
+      if (!questions) throw new Error('此消息没有可交互的问题，请重新同步')
+      const result = await instance.questions.answer(
+        threadId,
+        message.itemId,
+        questions,
+        message.answers,
+        (text) =>
+          this.call(instance, message.expectedTurnId ? 'turn/steer' : 'turn/start', {
+            threadId,
+            input: [{ type: 'text', text }],
+            ...(message.expectedTurnId ? { expectedTurnId: message.expectedTurnId } : {})
+          })
+      )
+      this.questionAnswers(instance, threadId)
+      return result
+    }
     if (message.action === 'delete') {
       if (message.confirmed !== true) throw new Error('请先确认永久删除此会话')
       try {
@@ -1051,8 +1126,8 @@ export class CodexGateway {
       }
       return {}
     }
-    if (message.action === 'history')
-      return message.before
+    if (message.action === 'history') {
+      const result = await (message.before
         ? anchoredHistory(
             (method, params) => this.call(instance, method, params),
             threadId,
@@ -1063,7 +1138,10 @@ export class CodexGateway {
             (method, params) => this.call(instance, method, params),
             threadId,
             message.cursor
-          )
+          ))
+      this.observeQuestionHistory(instance, threadId, result.data)
+      return result
+    }
     if (message.action === 'interrupt')
       return this.call(instance, 'turn/interrupt', { threadId, turnId: String(message.turnId) })
     if (message.action === 'send') {
