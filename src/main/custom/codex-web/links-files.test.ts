@@ -49,6 +49,50 @@ test('content links recognize URLs, Windows and relative paths, line/column suff
   assert.equal(query.get('base'), 'D:/project/src')
 })
 
+test('macOS paths and file URLs preserve spaces, Unicode and source positions', () => {
+  assert.deepEqual(fileLocation('file:///Users/momo/My%20Project/%E8%AF%B4%E6%98%8E.md#L12C3'), {
+    path: '/Users/momo/My Project/说明.md',
+    line: 12,
+    column: 3
+  })
+  assert.deepEqual(
+    contentTokens(
+      '查看 /Users/momo/project/src/main.ts:42:5 和 "/Users/momo/My Project/说明.md"。'
+    ).map((token) => token.value),
+    ['/Users/momo/project/src/main.ts:42:5', '/Users/momo/My Project/说明.md']
+  )
+  const href = contentHref('../docs/read%20me.md:7:2', {
+    instanceId: 'mac',
+    threadId: 'thread',
+    cwd: '/Users/momo/My Project/src'
+  })!
+  const query = new URL(href, 'http://localhost').searchParams
+  assert.equal(query.get('path'), '../docs/read me.md')
+  assert.equal(query.get('base'), '/Users/momo/My Project/src')
+  assert.equal(query.get('line'), '7')
+  assert.equal(query.get('column'), '2')
+})
+
+test('project paths resolve aliased roots and working directories without escaping the real project', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sparkle-files-alias-'))
+  const root = join(dir, 'My Project')
+  const alias = join(dir, 'project-link')
+  try {
+    await mkdir(join(root, 'src'), { recursive: true })
+    await writeFile(join(root, 'src', '说明.ts'), 'export {}')
+    await writeFile(join(dir, 'outside.txt'), 'outside')
+    await symlink(root, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    const expected = await realpath(join(root, 'src', '说明.ts'))
+    assert.equal(await projectPath(alias, './src/说明.ts'), expected)
+    assert.equal(await projectPath(alias, './说明.ts:3:2', join(alias, 'src')), expected)
+    assert.equal(await projectPath(root, './说明.ts', join(alias, 'src')), expected)
+    await assert.rejects(projectPath(alias, '../outside.txt'), /项目内/)
+    await assert.rejects(projectPath(alias, './outside.txt', dir), /项目内/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('project file routes serve read-only previews, raw images and downloads while enforcing the project boundary', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'sparkle-files-'))
   const root = join(dir, 'project')
@@ -130,7 +174,7 @@ test('bidirectional render windows keep a bounded page buffer and twenty message
   assert.equal(pageTurns(pages)[0].items[0].id, 'm0')
   for (let start = 20; start <= 90; start += 10)
     pages = shiftHistoryPages(pages, page(start), 'newer')
-  const items = pageTurns(pages,10)[0].items
+  const items = pageTurns(pages, 10)[0].items
   assert.equal(items[0].id, 'm80')
   assert.equal(items.at(-1).id, 'm99')
 })
