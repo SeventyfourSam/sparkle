@@ -9,6 +9,7 @@ import { LiveItemCache, recentHistory } from './history'
 import { anchoredHistory } from './history-pages'
 import { previewItem } from '../../../shared/codex-web-history'
 import { serveProjectFile } from './files'
+import { readSessions, sessionId } from './sessions'
 import { threadSettingsPatch, type CodexWebModel } from '../../../shared/codex-web-models'
 import { parseCodexWebCommand } from '../../../shared/codex-web-commands'
 import {
@@ -30,6 +31,7 @@ interface Instance extends CodexInstance {
   subscriptions: Map<string, Promise<unknown>>
   createdThreads: Map<string, { thread: CodexRecord; empty: boolean; generation: number }>
   createdGeneration: number
+  deletedThreads: Set<string>
   threadState: Map<string, CodexRecord>
   rateLimits?: CodexRecord
   modelCatalogs: Map<string, Promise<CodexWebModel[]>>
@@ -338,6 +340,7 @@ export class CodexGateway {
       subscriptions: new Map(),
       createdThreads: new Map(),
       createdGeneration: 0,
+      deletedThreads: new Set(),
       threadState: new Map(),
       modelCatalogs: new Map(),
       liveItems: new LiveItemCache()
@@ -405,6 +408,11 @@ export class CodexGateway {
     }
     if (typeof message.method !== 'string') return
     const params: CodexRecord = message.params || {}
+    if (message.method === 'thread/deleted' && typeof params.threadId === 'string') {
+      this.forgetThread(instance, params.threadId)
+      return
+    }
+    if (instance.deletedThreads.has(params.threadId)) return
     if (typeof params.threadId === 'string') {
       const state = instance.threadState.get(params.threadId) || {}
       if (message.method === 'thread/tokenUsage/updated') state.tokenUsage = params.tokenUsage
@@ -559,6 +567,26 @@ export class CodexGateway {
       requests: [...instance.requests.values()]
     })
   }
+  private forgetThread(instance: Instance, threadId: string): void {
+    if (instance.deletedThreads.has(threadId)) return
+    instance.deletedThreads.add(threadId)
+    while (instance.deletedThreads.size > 256)
+      instance.deletedThreads.delete(instance.deletedThreads.values().next().value!)
+    instance.threads = instance.threads.filter((thread) => thread.id !== threadId)
+    instance.subscriptions.delete(threadId)
+    instance.createdThreads.delete(threadId)
+    instance.threadState.delete(threadId)
+    for (const [key, request] of instance.requests)
+      if (request.params.threadId === threadId) instance.requests.delete(key)
+    for (const browser of this.browsers)
+      if (browser.watching?.instanceId === instance.id && browser.watching.threadId === threadId) {
+        browser.watching = undefined
+        browser.itemInterests.clear()
+      }
+    this.broadcast({ type: 'deleted', instanceId: instance.id, threadId })
+    this.broadcastRequests(instance)
+    this.changed()
+  }
   private async refresh(instance: Instance): Promise<void> {
     if (!instance.ready) return
     const startedGeneration = instance.createdGeneration
@@ -584,6 +612,7 @@ export class CodexGateway {
       )
       for (const [index, value] of result.entries()) {
         const id = ids[start + index]
+        if (instance.deletedThreads.has(id)) continue
         const created = instance.createdThreads.get(id)
         let thread =
           value.status === 'fulfilled' && value.value.thread
@@ -721,22 +750,8 @@ export class CodexGateway {
         await this.call(instance, 'thread/unsubscribe', { threadId: old.threadId }).catch(() => {})
     }
   }
-  private async watch(
-    browser: Browser,
-    instanceId: string,
-    threadId: string
-  ): Promise<CodexRecord> {
-    if (browser.socket.readyState !== WebSocket.OPEN) throw new Error('网页已断开')
-    if (browser.watching?.instanceId !== instanceId || browser.watching.threadId !== threadId)
-      await this.unwatch(browser)
-    // The browser may reconnect before app-server after a gateway restart.
-    browser.watching = { instanceId, threadId }
-    const instance = this.getInstance(instanceId)
-    if (browser.socket.readyState !== WebSocket.OPEN) throw new Error('网页已断开')
-    // Only join this runtime's existing threads, never resume another process's rollout.
-    if (!instance.threads.some((t) => t.id === threadId))
-      throw new Error('此会话已不在该 app-server 中运行，请刷新列表')
-    let subscribing = instance.subscriptions.get(threadId)
+  private subscribe(instance: Instance, threadId: string): Promise<CodexRecord> {
+    let subscribing = instance.subscriptions.get(threadId) as Promise<CodexRecord> | undefined
     if (!subscribing) {
       const revision = instance.threadState.get(threadId)?.settingsRevision
       subscribing = this.call(instance, 'thread/resume', { threadId, excludeTurns: true }).then(
@@ -759,6 +774,80 @@ export class CodexGateway {
       )
       instance.subscriptions.set(threadId, subscribing)
     }
+    const requested = subscribing
+    void requested.catch(() => {
+      if (instance.subscriptions.get(threadId) === requested)
+        instance.subscriptions.delete(threadId)
+    })
+    return subscribing
+  }
+
+  private async resume(browser: Browser, instance: Instance, value: unknown): Promise<CodexRecord> {
+    const threadId = sessionId(value)
+    const owner = [...this.instances.values()].find(
+      (item) => item.ready && item.threads.some((thread) => thread.id === threadId)
+    )
+    if (owner)
+      return {
+        instanceId: owner.id,
+        thread: owner.threads.find((thread) => thread.id === threadId)
+      }
+    try {
+      const result = await this.subscribe(instance, threadId)
+      if (result.thread?.id !== threadId) throw new Error('Codex 没有返回对应会话')
+      if (browser.socket.readyState !== WebSocket.OPEN) {
+        if (
+          ![...this.browsers].some(
+            (item) =>
+              item.watching?.instanceId === instance.id && item.watching.threadId === threadId
+          )
+        ) {
+          instance.subscriptions.delete(threadId)
+          await this.call(instance, 'thread/unsubscribe', { threadId }).catch(() => {})
+        }
+        throw new Error('网页已断开，请重新打开会话列表')
+      }
+      const thread = {
+        ...result.thread,
+        turns: [],
+        ...instance.threadState.get(threadId)?.settings
+      }
+      if (browser.watching?.instanceId !== instance.id || browser.watching.threadId !== threadId)
+        await this.unwatch(browser)
+      browser.watching = { instanceId: instance.id, threadId }
+      instance.deletedThreads.delete(threadId)
+      // Retain metadata across a refresh that started before the native resume completed.
+      instance.createdThreads.set(threadId, {
+        thread,
+        empty: false,
+        generation: ++instance.createdGeneration
+      })
+      instance.threads = [...instance.threads.filter((entry) => entry.id !== threadId), thread]
+      this.changed()
+      return { instanceId: instance.id, thread }
+    } catch (error) {
+      if (/active writer|already.*(?:running|loaded)|another process/i.test(String(error)))
+        throw new Error('此会话正在其他 Codex 进程中运行。请连接所属实例，或先在原终端退出该会话。')
+      throw error
+    }
+  }
+
+  private async watch(
+    browser: Browser,
+    instanceId: string,
+    threadId: string
+  ): Promise<CodexRecord> {
+    if (browser.socket.readyState !== WebSocket.OPEN) throw new Error('网页已断开')
+    if (browser.watching?.instanceId !== instanceId || browser.watching.threadId !== threadId)
+      await this.unwatch(browser)
+    // The browser may reconnect before app-server after a gateway restart.
+    browser.watching = { instanceId, threadId }
+    const instance = this.getInstance(instanceId)
+    if (browser.socket.readyState !== WebSocket.OPEN) throw new Error('网页已断开')
+    // Opening a live list entry never implicitly loads an arbitrary saved rollout.
+    if (!instance.threads.some((t) => t.id === threadId))
+      throw new Error('此会话已不在该 app-server 中运行，请刷新列表')
+    const subscribing = this.subscribe(instance, threadId)
     let subscribed = false
     try {
       const resumed = (await subscribing) as CodexRecord
@@ -834,6 +923,18 @@ export class CodexGateway {
         [...this.instances.values()].flatMap((item) => item.threads.map((thread) => thread.cwd))
       )
     const instance = this.getInstance(String(message.instanceId))
+    if (message.action === 'sessions') {
+      const page = await readSessions(message, (method, params) =>
+        this.call(instance, method, params)
+      )
+      page.data = page.data.filter((thread) => !instance.deletedThreads.has(thread.id))
+      for (const thread of page.data)
+        thread.runningInstanceId = [...this.instances.values()].find(
+          (item) => item.ready && item.threads.some((entry) => entry.id === thread.id)
+        )?.id
+      return page
+    }
+    if (message.action === 'resume') return this.resume(browser, instance, message.threadId)
     if (message.action === 'create') {
       const cwd = await workingDirectory(message.cwd)
       const result = await this.call(instance, 'thread/start', { cwd })
@@ -881,6 +982,18 @@ export class CodexGateway {
       throw new Error('请先打开对应会话')
     const threadId = String(message.threadId)
     if (!instance.subscriptions.has(threadId)) throw new Error('请先重新同步会话')
+    if (message.action === 'delete') {
+      if (message.confirmed !== true) throw new Error('请先确认永久删除此会话')
+      try {
+        await this.call(instance, 'thread/delete', { threadId })
+      } catch (error) {
+        if (/method not found|unknown variant|unknown method/i.test(String(error)))
+          throw new Error('当前 Codex 不支持删除会话，请更新 Codex 后重试')
+        throw error
+      }
+      this.forgetThread(instance, threadId)
+      return {}
+    }
     if (message.action === 'item' || message.action === 'item/unwatch') {
       if (
         typeof message.turnId !== 'string' ||

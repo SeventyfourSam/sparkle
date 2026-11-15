@@ -7,6 +7,10 @@ export async function executeWebCommand(
   turnId: unknown,
   call: (method: string, params: CodexRecord) => Promise<CodexRecord>
 ): Promise<CodexRecord> {
+  if (command.name === 'resume')
+    return { webCommand: { name: 'resume', threadId: command.threadId } }
+  if (command.name === 'delete')
+    return { webCommand: { name: 'delete', requiresConfirmation: true } }
   if (command.name === 'goal') {
     if (command.operation === 'get')
       return { webCommand: { name: 'goal', ...(await call('thread/goal/get', { threadId })) } }

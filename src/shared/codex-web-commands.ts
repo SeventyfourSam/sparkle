@@ -1,5 +1,6 @@
 export type CodexWebCommand =
-  | { name: 'help' | 'status' | 'compact' | 'stop' | 'model' | 'reasoning' }
+  | { name: 'help' | 'status' | 'compact' | 'stop' | 'model' | 'reasoning' | 'delete' }
+  | { name: 'resume'; threadId?: string }
   | {
       name: 'goal'
       operation: 'get' | 'clear' | 'set'
@@ -9,6 +10,8 @@ export type CodexWebCommand =
     }
 
 export const codexWebCommands = [
+  { name: 'resume', description: '恢复已有会话', usage: '/resume [会话 ID]' },
+  { name: 'delete', description: '删除当前会话，执行前确认', usage: '/delete 永久删除当前会话' },
   { name: 'model', description: '修改模型与推理强度', usage: '/model 打开会话模型设置' },
   { name: 'reasoning', description: '修改推理强度', usage: '/reasoning 打开会话模型设置' },
   {
@@ -27,6 +30,11 @@ export function parseCodexWebCommand(text: string): CodexWebCommand | null {
   if (!match) return null
   const name = match[1].toLowerCase()
   const args = (match[2] || '').trim()
+  if (name === 'resume') {
+    if (args && !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(args))
+      throw new Error('用法：/resume 打开恢复列表，或 /resume <完整会话 ID>。')
+    return args ? { name, threadId: args } : { name }
+  }
   if (name === 'side' || name === 'btw')
     throw new Error('/side 需要 Codex 提供完整的旁支会话接口，网页暂不支持；这条命令不会发给模型。')
   if (name === 'goal') {
@@ -61,7 +69,8 @@ export function parseCodexWebCommand(text: string): CodexWebCommand | null {
     name === 'compact' ||
     name === 'stop' ||
     name === 'model' ||
-    name === 'reasoning'
+    name === 'reasoning' ||
+    name === 'delete'
   ) {
     if (args) throw new Error(`/${name} 不接受额外参数。`)
     return { name }

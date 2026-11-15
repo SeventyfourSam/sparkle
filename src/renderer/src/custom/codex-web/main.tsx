@@ -9,6 +9,9 @@ import {
 } from '../../../../shared/codex-web'
 import { useGateway } from './client'
 import { DirectoryPicker } from './directory-picker'
+import { ResumeSessionDialog, SessionHistory } from './session-picker'
+import { DeleteSessionDialog, type DeleteSessionTarget } from './delete-session'
+import { contentHref } from '../../../../shared/codex-web-links'
 import { SessionStatus } from './status-line'
 import { ModelSettings } from './model-settings'
 import { useComposerEditing } from './composer-editing'
@@ -492,10 +495,13 @@ function App(): React.JSX.Element {
   const [showScrollBottom, setShowScrollBottom] = useState(false)
   const [statusExpanded, setStatusExpanded] = useState(false)
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false)
+  const [resumeOpen, setResumeOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<DeleteSessionTarget>()
   const [showCommandHelp, setShowCommandHelp] = useState(false)
   const [dismissCommandSuggestions, setDismissCommandSuggestions] = useState(false)
   const [commandError, setCommandError] = useState('')
   const [creating, setCreating] = useState(false)
+  const [historyLoading, setHistoryLoading] = useState(false)
   const [createError, setCreateError] = useState('')
   const [newInstance, setNewInstance] = useState('')
   const [newCwd, setNewCwd] = useState('')
@@ -511,7 +517,25 @@ function App(): React.JSX.Element {
   const nearBottom = useRef(true)
   const hydrating = useRef(true)
   const events = useRef<CodexRecord[]>([])
+  const forgetThread = (target: Selection): void => {
+    drafts.current.delete(`${target.instanceId}:${target.threadId}`)
+    const selected = selectionRef.current
+    if (selected?.instanceId === target.instanceId && selected.threadId === target.threadId) {
+      setSelection(undefined)
+      setConversation(emptyConversation())
+      setDraft('')
+      setCommandError('')
+      setToast('会话已删除')
+    }
+    setDeleteTarget((old) =>
+      old?.instanceId === target.instanceId && old.threadId === target.threadId ? undefined : old
+    )
+  }
   const { connected, command } = useGateway((message) => {
+    if (message.type === 'deleted') {
+      forgetThread({ instanceId: message.instanceId, threadId: message.threadId })
+      return
+    }
     if (message.type === 'error') setToast(message.error)
     if (message.type === 'instances') setInstances(message.instances)
     if (message.type === 'requests')
@@ -661,8 +685,9 @@ function App(): React.JSX.Element {
   )
   const visible = allThreads.sort((a, b) => (b.thread.updatedAt || 0) - (a.thread.updatedAt || 0))
 
-  const select = (next: Selection): void => {
-    if (selection) drafts.current.set(`${selection.instanceId}:${selection.threadId}`, draft)
+  const select = (next: Selection, preserveDraft = true): void => {
+    if (selection && preserveDraft)
+      drafts.current.set(`${selection.instanceId}:${selection.threadId}`, draft)
     setDraft(drafts.current.get(`${next.instanceId}:${next.threadId}`) || '')
     setSelection(next)
   }
@@ -672,6 +697,7 @@ function App(): React.JSX.Element {
       available.find((item) => item.id === selection?.instanceId)?.id || available[0]?.id || ''
     )
     setNewCwd('')
+    setHistoryLoading(false)
     setCreateError('')
     setChoosingDirectory(true)
     setCreateOpen(true)
@@ -679,7 +705,7 @@ function App(): React.JSX.Element {
   }
   const create = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
-    if (!connected || !newInstance || !newCwd || creating) return
+    if (!connected || !newInstance || !newCwd || creating || historyLoading) return
     const instanceId = newInstance
     setCreating(true)
     setCreateError('')
@@ -689,6 +715,18 @@ function App(): React.JSX.Element {
       createDialog.current?.close()
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCreating(false)
+    }
+  }
+  const resumeFromCreate = async (threadId: string): Promise<void> => {
+    if (creating || !connected || !newInstance) return
+    setCreating(true)
+    setCreateError('')
+    try {
+      const result = await command('resume', { instanceId: newInstance, threadId })
+      select({ instanceId: result.instanceId, threadId: result.thread.id })
+      createDialog.current?.close()
     } finally {
       setCreating(false)
     }
@@ -707,6 +745,35 @@ function App(): React.JSX.Element {
     setCommandError('')
     try {
       const parsed = parseCodexWebCommand(text)
+      if (parsed?.name === 'delete') {
+        setDeleteTarget({
+          ...target,
+          name: thread?.name || metadata?.name || thread?.preview || '未命名会话',
+          cwd: thread?.cwd || metadata?.cwd
+        })
+        setShowCommandHelp(false)
+        return
+      }
+      if (parsed?.name === 'resume') {
+        if (parsed.threadId) {
+          const result = await command('resume', {
+            instanceId: target.instanceId,
+            threadId: parsed.threadId
+          })
+          if (selectionRef.current !== target) return
+          const key = `${target.instanceId}:${target.threadId}`
+          if (draftRef.current === text) drafts.current.delete(key)
+          else drafts.current.set(key, draftRef.current)
+          select({ instanceId: result.instanceId, threadId: result.thread.id }, false)
+        } else {
+          drafts.current.delete(`${target.instanceId}:${target.threadId}`)
+          setDraft('')
+          setResumeOpen(true)
+        }
+        setShowCommandHelp(false)
+        composerEditing.finish()
+        return
+      }
       if (
         parsed?.name === 'help' ||
         parsed?.name === 'status' ||
@@ -872,6 +939,18 @@ function App(): React.JSX.Element {
                   <Badge
                     status={online ? metadata?.status || thread?.status : { type: 'offline' }}
                   />
+                  {linkScope?.cwd && (
+                    <a
+                      className="icon-button project-directory-button"
+                      aria-label="打开项目目录"
+                      title="打开项目目录"
+                      href={contentHref('./', linkScope)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <Icon name="folder" />
+                    </a>
+                  )}
                 </header>
                 {!!pending.length && (
                   <button className="pending-banner" onClick={scrollToBottom}>
@@ -1195,6 +1274,28 @@ function App(): React.JSX.Element {
               onSaved={() => setToast('已保存模型与推理强度，将用于后续任务')}
             />
           )}
+          {deleteTarget && (
+            <DeleteSessionDialog
+              target={deleteTarget}
+              command={command}
+              online={
+                connected && !!instances.find((item) => item.id === deleteTarget.instanceId)?.ready
+              }
+              onDeleted={() => forgetThread(deleteTarget)}
+              onClose={() => setDeleteTarget(undefined)}
+            />
+          )}
+          {resumeOpen && (
+            <ResumeSessionDialog
+              command={command}
+              instances={instances}
+              initialInstance={selection?.instanceId}
+              cwd={thread?.cwd || metadata?.cwd}
+              connected={connected}
+              onSelected={select}
+              onClose={() => setResumeOpen(false)}
+            />
+          )}
           <dialog
             ref={createDialog}
             aria-label="新建会话"
@@ -1222,6 +1323,7 @@ function App(): React.JSX.Element {
                 ]}
                 onSelect={(path) => {
                   setNewCwd(path)
+                  setHistoryLoading(true)
                   setCreateError('')
                   setChoosingDirectory(false)
                 }}
@@ -1263,7 +1365,10 @@ function App(): React.JSX.Element {
                     aria-label="Codex 服务"
                     value={newInstance}
                     disabled={creating || !instances.some((item) => item.ready)}
-                    onChange={(event) => setNewInstance(event.target.value)}
+                    onChange={(event) => {
+                      setHistoryLoading(true)
+                      setNewInstance(event.target.value)
+                    }}
                   >
                     {!instances.some((item) => item.ready) && (
                       <option value="">等待 Codex 接入</option>
@@ -1279,6 +1384,17 @@ function App(): React.JSX.Element {
                 </label>
                 {!instances.some((item) => item.ready) && (
                   <p className="create-note">请先启动已连接 Sparkle 的 Codex，再创建会话。</p>
+                )}
+                {connected && newInstance && newCwd && (
+                  <SessionHistory
+                    key={`${newInstance}:${newCwd}`}
+                    command={command}
+                    instanceId={newInstance}
+                    cwd={newCwd}
+                    disabled={creating}
+                    onLoadingChange={setHistoryLoading}
+                    onResume={resumeFromCreate}
+                  />
                 )}
                 {createError && (
                   <p className="create-error" role="alert">
@@ -1300,11 +1416,12 @@ function App(): React.JSX.Element {
                     disabled={
                       !connected ||
                       creating ||
+                      historyLoading ||
                       !newCwd ||
                       !instances.some((item) => item.ready && item.id === newInstance)
                     }
                   >
-                    {creating ? '正在创建…' : '创建会话'}
+                    {creating ? '正在创建…' : historyLoading ? '正在查询历史…' : '创建会话'}
                     <Icon name="arrow" size={16} />
                   </button>
                 </div>

@@ -52,6 +52,12 @@ async function fixture(
     unsupportedGoals?: boolean
     unsupportedSettings?: boolean
     rejectSettings?: boolean
+    savedSessions?: CodexRecord[]
+    refuseSavedResume?: boolean
+    deferSavedResume?: boolean
+    rejectDelete?: boolean
+    unsupportedDelete?: boolean
+    deferThreadReads?: boolean
   } = {}
 ): Promise<{
   gateway: CodexGateway
@@ -96,11 +102,45 @@ async function fixture(
     turns: []
   }
   const created = new Map<string, CodexRecord>()
+  const restored = new Map<string, CodexRecord>()
+  const deleted = new Set<string>()
   const persisted = new Set<string>()
   let goal: CodexRecord | null = null
   backend.on('message', (bytes) => {
     const message = JSON.parse(bytes.toString())
     if (!message.method || message.id === undefined) return
+    if (options.deferThreadReads && message.method === 'thread/read') return
+    if (message.method === 'thread/delete') {
+      if (options.rejectDelete || options.unsupportedDelete) {
+        backend.send(
+          JSON.stringify({
+            id: message.id,
+            error: {
+              code: options.unsupportedDelete ? -32601 : -32600,
+              message: options.unsupportedDelete ? 'Method not found' : 'deletion refused'
+            }
+          })
+        )
+        return
+      }
+      deleted.add(message.params.threadId)
+      created.delete(message.params.threadId)
+      restored.delete(message.params.threadId)
+    }
+    const saved = options.savedSessions?.find((entry) => entry.id === message.params?.threadId)
+    if (saved && message.method === 'thread/resume') {
+      if (options.deferSavedResume) return
+      if (options.refuseSavedResume) {
+        backend.send(
+          JSON.stringify({
+            id: message.id,
+            error: { code: -32600, message: `thread ${saved.id} already has an active writer` }
+          })
+        )
+        return
+      }
+      restored.set(saved.id, saved)
+    }
     if (
       message.method === 'thread/settings/update' &&
       (options.unsupportedSettings || options.rejectSettings)
@@ -213,9 +253,25 @@ async function fixture(
     }
     if (message.method === 'thread/loaded/list')
       result = {
-        data: [...(options.emptyInitial ? [] : ['thread-a']), ...created.keys()],
+        data: [
+          ...(options.emptyInitial ? [] : ['thread-a']),
+          ...created.keys(),
+          ...restored.keys()
+        ].filter((id) => !deleted.has(id)),
         nextCursor: null
       }
+    if (message.method === 'thread/list') {
+      const values = (options.savedSessions || []).filter(
+        (entry) =>
+          !deleted.has(entry.id) && (!message.params.cwd || entry.cwd === message.params.cwd)
+      )
+      const start = Number(message.params.cursor) || 0
+      result = {
+        data: values.slice(start, start + message.params.limit),
+        nextCursor:
+          start + message.params.limit < values.length ? String(start + message.params.limit) : null
+      }
+    }
     if (message.method === 'thread/start') {
       const id = `created-${created.size + 1}`
       const value = {
@@ -237,7 +293,7 @@ async function fixture(
         )
         return
       }
-      result = { thread: created.get(id) || thread }
+      result = { thread: created.get(id) || restored.get(id) || thread }
     }
     if (message.method === 'turn/start') {
       persisted.add(message.params.threadId)
@@ -273,6 +329,10 @@ async function fixture(
         ]
       }
     backend.send(JSON.stringify({ id: message.id, result }))
+    if (message.method === 'thread/delete')
+      backend.send(
+        JSON.stringify({ method: 'thread/deleted', params: { threadId: message.params.threadId } })
+      )
   })
   await once(backend, 'open')
   await rpc.wait((m) => m.method === 'initialized')
@@ -454,6 +514,254 @@ test('new sessions use thread/start, keep an empty thread available, then send t
         )
       ).params.threadId,
       'created-1'
+    )
+  } finally {
+    await f.close()
+  }
+})
+
+test('saved sessions list project pages without loading history, then explicitly resume and reuse the subscription', async () => {
+  const savedSessions = Array.from({ length: 25 }, (_, i) => ({
+    id: `saved-${i}`,
+    name: `Saved ${i}`,
+    cwd: tmpdir(),
+    preview: 'history',
+    updatedAt: i,
+    status: { type: 'idle' }
+  }))
+  const f = await fixture({ savedSessions })
+  try {
+    const page = await f.action('sessions', { cwd: tmpdir() })
+    assert.equal(page.result.data.length, 20)
+    assert.equal(page.result.nextCursor, '20')
+    assert.equal(
+      f.rpc.messages.some((m) => m.method === 'thread/resume'),
+      false
+    )
+    const next = await f.action('sessions', { cwd: tmpdir(), cursor: page.result.nextCursor })
+    assert.equal(next.result.data.length, 5)
+    assert.equal(next.result.nextCursor, null)
+    assert.deepEqual((await f.rpc.wait((m) => m.method === 'thread/list')).params, {
+      cwd: tmpdir(),
+      limit: 20,
+      sortKey: 'updated_at',
+      sortDirection: 'desc',
+      archived: false,
+      modelProviders: []
+    })
+    assert.equal((await f.action('watch', { threadId: 'saved-0' })).error.includes('不在'), true)
+    const resumed = await f.action('resume', { threadId: 'saved-0' })
+    assert.equal(resumed.error, undefined)
+    assert.equal(resumed.result.instanceId, 'instance-a')
+    assert.equal(resumed.result.thread.id, 'saved-0')
+    assert.equal((await f.action('watch', { threadId: 'saved-0' })).error, undefined)
+    await f.web.wait((m) => m.type === 'history' && m.threadId === 'saved-0')
+    const resumes = f.rpc.messages.filter((m) => m.method === 'thread/resume')
+    assert.deepEqual(
+      resumes.map((m) => m.params),
+      [{ threadId: 'saved-0', excludeTurns: true }]
+    )
+    assert.equal(
+      f.rpc.messages.some((m) => m.method === 'thread/start' || m.method === 'turn/start'),
+      false
+    )
+    await f.action('refresh')
+    assert(f.gateway.snapshot()[0].threads.some((thread) => thread.id === 'saved-0'))
+    await f.action('unwatch')
+    await f.rpc.wait((m) => m.method === 'thread/unsubscribe' && m.params.threadId === 'saved-0')
+  } finally {
+    await f.close()
+  }
+})
+
+test('resume joins an already connected owner instead of loading the rollout into another instance', async () => {
+  const f = await fixture()
+  const other = new WebSocket(`ws://127.0.0.1:${f.port}/codex/app-server`, {
+    headers: {
+      'x-codex-pid': '23456',
+      'x-codex-instance-id': 'other',
+      'x-codex-runtime': 'standalone'
+    }
+  })
+  const messages: CodexRecord[] = []
+  other.on('message', (bytes) => {
+    const message = JSON.parse(bytes.toString())
+    messages.push(message)
+    if (message.id !== undefined && message.method)
+      other.send(
+        JSON.stringify({
+          id: message.id,
+          result: message.method === 'thread/loaded/list' ? { data: [], nextCursor: null } : {}
+        })
+      )
+  })
+  try {
+    await once(other, 'open')
+    await f.web.wait(
+      (m) =>
+        m.type === 'instances' && m.instances.some((i: CodexRecord) => i.id === 'other' && i.ready)
+    )
+    const result = await f.action('resume', { instanceId: 'other', threadId: 'thread-a' })
+    assert.equal(result.result.instanceId, 'instance-a')
+    assert.equal(result.result.thread.id, 'thread-a')
+    assert.equal(
+      messages.some((m) => m.method === 'thread/resume'),
+      false
+    )
+  } finally {
+    await f.close()
+  }
+})
+
+test('a refused saved-session resume preserves the current subscription and never starts a turn', async () => {
+  const f = await fixture({
+    savedSessions: [{ id: 'occupied', name: 'Occupied', cwd: tmpdir() }],
+    refuseSavedResume: true
+  })
+  try {
+    await f.action('watch')
+    const result = await f.action('resume', { threadId: 'occupied' })
+    assert.match(result.error, /其他 Codex 进程/)
+    assert.equal(
+      f.rpc.messages.some((m) => m.method === 'thread/unsubscribe'),
+      false
+    )
+    assert.equal(
+      f.rpc.messages.some((m) => m.method === 'turn/start'),
+      false
+    )
+    const command = await f.action('send', { text: '/resume' })
+    assert.equal(command.result.webCommand.name, 'resume')
+    assert.equal(
+      (await f.action('send', { text: 'still in the original thread' })).error,
+      undefined
+    )
+  } finally {
+    await f.close()
+  }
+})
+
+test('closing the browser during a saved-session resume releases the completed native subscription', async () => {
+  const f = await fixture({
+    savedSessions: [{ id: 'delayed', cwd: tmpdir() }],
+    deferSavedResume: true
+  })
+  try {
+    f.browser.send(
+      JSON.stringify({
+        id: 'delayed-request',
+        action: 'resume',
+        instanceId: 'instance-a',
+        threadId: 'delayed'
+      })
+    )
+    const request = await f.rpc.wait((m) => m.method === 'thread/resume')
+    f.browser.close()
+    await once(f.browser, 'close')
+    f.backend.send(
+      JSON.stringify({ id: request.id, result: { thread: { id: 'delayed', cwd: tmpdir() } } })
+    )
+    await f.rpc.wait((m) => m.method === 'thread/unsubscribe' && m.params.threadId === 'delayed')
+  } finally {
+    await f.close()
+  }
+})
+
+test('delete requires confirmation, removes the original native thread and synchronizes other browsers', async () => {
+  const f = await fixture()
+  const other = new WebSocket(`ws://127.0.0.1:${f.webPort}/codex/browser`, {
+    origin: `http://127.0.0.1:${f.webPort}`
+  })
+  const web = inbox(other)
+  try {
+    await f.action('watch')
+    if (other.readyState !== WebSocket.OPEN) await once(other, 'open')
+    other.send(
+      JSON.stringify({
+        id: 'second-watch',
+        action: 'watch',
+        instanceId: 'instance-a',
+        threadId: 'thread-a'
+      })
+    )
+    await web.wait((m) => m.type === 'history')
+    const slash = await f.action('send', { text: '/delete' })
+    assert.deepEqual(slash.result.webCommand, { name: 'delete', requiresConfirmation: true })
+    assert.match((await f.action('delete')).error, /先确认/)
+    assert.equal(
+      f.rpc.messages.some((m) => m.method === 'thread/delete'),
+      false
+    )
+    assert.equal(
+      f.rpc.messages.some((m) => m.method === 'turn/start'),
+      false
+    )
+    assert.equal((await f.action('delete', { confirmed: true })).error, undefined)
+    assert.deepEqual((await f.rpc.wait((m) => m.method === 'thread/delete')).params, {
+      threadId: 'thread-a'
+    })
+    await web.wait((m) => m.type === 'deleted' && m.threadId === 'thread-a')
+    assert.equal(f.gateway.snapshot()[0].threads.length, 0)
+    assert.match((await f.action('send', { text: 'must not be sent' })).error, /先打开/)
+    await f.action('refresh')
+    assert.equal(f.gateway.snapshot()[0].threads.length, 0)
+  } finally {
+    await f.close()
+  }
+})
+
+test('failed or unsupported native deletion preserves the current subscription and thread metadata', async () => {
+  for (const options of [{ rejectDelete: true }, { unsupportedDelete: true }]) {
+    const f = await fixture(options)
+    try {
+      await f.action('watch')
+      const result = await f.action('delete', { confirmed: true })
+      assert.match(result.error, options.unsupportedDelete ? /更新 Codex/ : /deletion refused/)
+      assert.equal(f.gateway.snapshot()[0].threads[0].id, 'thread-a')
+      assert.equal(
+        f.web.messages.some((m) => m.type === 'deleted'),
+        false
+      )
+      assert.equal((await f.action('send', { text: 'still connected' })).error, undefined)
+    } finally {
+      await f.close()
+    }
+  }
+})
+
+test('late thread metadata and events cannot restore a thread deleted by another client', async () => {
+  const options = { deferThreadReads: false }
+  const f = await fixture(options)
+  try {
+    await f.action('watch')
+    f.rpc.messages.splice(0)
+    options.deferThreadReads = true
+    const refreshing = f.action('refresh')
+    const request = await f.rpc.wait((m) => m.method === 'thread/read')
+    f.backend.send(JSON.stringify({ method: 'thread/deleted', params: { threadId: 'thread-a' } }))
+    await f.web.wait((m) => m.type === 'deleted')
+    f.backend.send(
+      JSON.stringify({
+        id: request.id,
+        result: { thread: { id: 'thread-a', name: 'stale', cwd: tmpdir() } }
+      })
+    )
+    await refreshing
+    assert.equal(f.gateway.snapshot()[0].threads.length, 0)
+    f.backend.send(
+      JSON.stringify({
+        method: 'item/started',
+        params: {
+          threadId: 'thread-a',
+          turnId: 'late',
+          item: { id: 'late', type: 'agentMessage', text: 'stale event' }
+        }
+      })
+    )
+    assert.match((await f.action('send', { text: 'blocked' })).error, /先打开/)
+    assert.equal(
+      f.web.messages.some((m) => m.method === 'item/started'),
+      false
     )
   } finally {
     await f.close()

@@ -93,6 +93,14 @@ test('turn errors and interruptions remain visible and separate from collapsed o
 test('slash parsing preserves paths and literal slash text, and rejects invalid goal budgets', () => {
   assert.deepEqual(parseCodexWebCommand('/model'), { name: 'model' })
   assert.deepEqual(parseCodexWebCommand('/reasoning'), { name: 'reasoning' })
+  assert.deepEqual(parseCodexWebCommand('/resume'), { name: 'resume' })
+  assert.deepEqual(parseCodexWebCommand('/delete'), { name: 'delete' })
+  assert.throws(() => parseCodexWebCommand('/delete other-thread'), /不接受额外参数/)
+  assert.deepEqual(parseCodexWebCommand('/resume 01a10041-ed10-74b1-bb0a-31c407c922c3'), {
+    name: 'resume',
+    threadId: '01a10041-ed10-74b1-bb0a-31c407c922c3'
+  })
+  assert.throws(() => parseCodexWebCommand('/resume invalid-id'), /完整会话 ID/)
   assert.equal(parseCodexWebCommand('/home/project'), null)
   assert.equal(parseCodexWebCommand('//goal plain text'), null)
   assert.deepEqual(parseCodexWebCommand('/goal budget off'), {

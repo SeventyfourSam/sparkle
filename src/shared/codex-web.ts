@@ -22,6 +22,20 @@ export interface CodexDirectoryListing {
   truncated: boolean
 }
 
+export interface CodexSavedSession {
+  id: string
+  name: string
+  preview: string
+  cwd: string
+  updatedAt: number
+  runningInstanceId?: string
+}
+
+export interface CodexSessionPage {
+  data: CodexSavedSession[]
+  nextCursor: string | null
+}
+
 export interface CodexInstance {
   id: string
   pid: number
