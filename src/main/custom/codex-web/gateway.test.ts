@@ -254,6 +254,24 @@ async function fixture(
         ],
         nextCursor: null
       }
+    if (message.method === 'thread/items/list')
+      result = {
+        data: [{ turnId: 'turn-a', item: { id: 'item-a', type: 'agentMessage', text: 'Hello' } }],
+        nextCursor: null
+      }
+    if (message.method === 'thread/items/read')
+      result = {
+        data: [
+          {
+            turnId: message.params.turnId,
+            item: {
+              id: message.params.itemIds[0],
+              type: 'commandExecution',
+              aggregatedOutput: 'persisted output'
+            }
+          }
+        ]
+      }
     backend.send(JSON.stringify({ id: message.id, result }))
   })
   await once(backend, 'open')
@@ -305,6 +323,89 @@ test('reverse handshake initializes the native client and serves only the mobile
     assert.match(await (await fetch(`http://127.0.0.1:${f.port}/`)).text(), /Codex mobile/)
     assert.equal((await fetch(`http://127.0.0.1:${f.port}/index.html`)).status, 404)
     assert.equal((await fetch(`http://127.0.0.1:${f.port}/assets/..%2f..%2fsecret`)).status, 404)
+  } finally {
+    await f.close()
+  }
+})
+
+test('watch sends history once and streams heavy output only while that detail is open', async () => {
+  const f = await fixture()
+  try {
+    const ack = await f.action('watch')
+    assert.deepEqual(ack.result, {})
+    const history = await f.web.wait((m) => m.type === 'history')
+    assert.equal(history.turns[0].items[0].text, 'Hello')
+    assert.equal(
+      (await f.rpc.wait((m) => m.method === 'thread/turns/list')).params.itemsView,
+      'summary'
+    )
+    f.backend.send(
+      JSON.stringify({
+        method: 'item/started',
+        params: {
+          threadId: 'thread-a',
+          turnId: 'turn-a',
+          item: {
+            id: 'cmd',
+            type: 'commandExecution',
+            aggregatedOutput: 'hidden payload',
+            status: 'inProgress'
+          }
+        }
+      })
+    )
+    const start = await f.web.wait((m) => m.method === 'item/started')
+    assert.equal(start.params.item.aggregatedOutput, undefined)
+    assert.equal(start.params.item.webDeferred, true)
+    f.backend.send(
+      JSON.stringify({
+        method: 'item/commandExecution/outputDelta',
+        params: { threadId: 'thread-a', turnId: 'turn-a', itemId: 'cmd', delta: ' first' }
+      })
+    )
+    const detail = await f.action('item', { turnId: 'turn-a', itemId: 'cmd' })
+    assert.equal(detail.result.item.aggregatedOutput, 'hidden payload first')
+    assert.equal(
+      f.web.messages.some((m) => m.method === 'item/commandExecution/outputDelta'),
+      false
+    )
+    f.backend.send(
+      JSON.stringify({
+        method: 'item/commandExecution/outputDelta',
+        params: { threadId: 'thread-a', turnId: 'turn-a', itemId: 'cmd', delta: ' live' }
+      })
+    )
+    const live = await f.web.wait((m) => m.type === 'detail')
+    assert.equal(live.delta, ' live')
+    assert.ok(live.revision > detail.result.revision)
+    await f.action('item/unwatch', { turnId: 'turn-a', itemId: 'cmd' })
+    f.backend.send(
+      JSON.stringify({
+        method: 'item/commandExecution/outputDelta',
+        params: { threadId: 'thread-a', turnId: 'turn-a', itemId: 'cmd', delta: ' closed' }
+      })
+    )
+    // The following lightweight lifecycle event is an ordering barrier on the same socket.
+    f.backend.send(
+      JSON.stringify({
+        method: 'turn/completed',
+        params: {
+          threadId: 'thread-a',
+          turn: {
+            id: 'turn-a',
+            status: 'completed',
+            items: [{ id: 'huge', text: 'x'.repeat(10000) }]
+          }
+        }
+      })
+    )
+    const completed = await f.web.wait((m) => m.method === 'turn/completed')
+    assert.deepEqual(completed.params.turn.items, [])
+    assert.equal(
+      f.web.messages.some((m) => m.type === 'detail'),
+      false
+    )
+    assert.match((await f.action('item', { turnId: '', itemId: 'cmd' })).error, /无效/)
   } finally {
     await f.close()
   }

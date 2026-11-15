@@ -1,10 +1,17 @@
 import type { CodexRecord } from '../../../../shared/codex-web'
 import { threadSettingsPatch } from '../../../../shared/codex-web-models'
+import {
+  HISTORY_TEXT_LIMIT,
+  isToolItem,
+  visibleNarrative
+} from '../../../../shared/codex-web-history'
 
 export interface Conversation {
   thread?: CodexRecord
   turns: CodexRecord[]
   nextCursor?: string | null
+  newerCursor?: string | null
+  activeTurn?: CodexRecord | null
   loading: boolean
   subscribed?: boolean
   tokenUsage?: CodexRecord
@@ -12,9 +19,48 @@ export interface Conversation {
   rateLimits?: CodexRecord
   plan?: CodexRecord[]
   diff?: string
+  diffAvailable?: boolean
+  historyNotice?: string
+  browsingHistory?: boolean
+  windowTrimmed?: boolean
   error?: string
 }
 export const emptyConversation = (): Conversation => ({ turns: [], loading: true })
+
+export function trimWindow(state: Conversation, limit = 20, offset = 0): Conversation {
+  const all = state.turns.flatMap((turn) => turn.items || [])
+  const ordered = state.browsingHistory ? all : [...all].reverse()
+  const positions = new Map(all.map((item, index) => [item, index]))
+  const accepted = new Set<CodexRecord>()
+  let count = 0
+  for (const item of ordered) {
+    if (visibleNarrative(item)) {
+      if (count >= offset && count < offset + limit) accepted.add(item)
+      count++
+    }
+  }
+  const indexes = all
+    .map((item, index) => (accepted.has(item) ? index : -1))
+    .filter((index) => index >= 0)
+  const lower = indexes.length ? Math.min(...indexes) : Math.max(0, all.length - 160)
+  const upper = state.browsingHistory && indexes.length ? Math.max(...indexes) : all.length
+  let tools = 0
+  for (const item of ordered) {
+    const index = positions.get(item)!
+    if (isToolItem(item) && index >= lower && index <= upper && tools++ < 160) accepted.add(item)
+  }
+  let dropped = false
+  const turns = state.turns.flatMap((turn) => {
+    const items = (turn.items || []).filter((item: CodexRecord) => accepted.has(item))
+    if (
+      (turn.items || []).some((item: CodexRecord) => visibleNarrative(item) && !accepted.has(item))
+    )
+      dropped = true
+    if (!items.length && turn.status !== 'inProgress') return []
+    return [items.length === (turn.items || []).length ? turn : { ...turn, items }]
+  })
+  return { ...state, turns, windowTrimmed: state.windowTrimmed || dropped }
+}
 
 export function mergeTurns(first: CodexRecord[], second: CodexRecord[]): CodexRecord[] {
   const result: CodexRecord[] = first.map((turn) => ({ ...turn, items: [...(turn.items || [])] }))
@@ -47,23 +93,33 @@ export function reduceEvent(
   if (method === 'thread/goal/cleared') return { ...state, goal: null }
   if (method === 'account/rateLimits/updated') return { ...state, rateLimits: params }
   if (method === 'turn/plan/updated') return { ...state, plan: params.plan }
-  if (method === 'turn/diff/updated') return { ...state, diff: params.diff }
+  if (method === 'turn/diff/updated')
+    return { ...state, diffAvailable: params.diffAvailable ?? !!params.diff }
   if (method === 'error')
     return { ...state, error: params.error?.message || params.message || '任务出错' }
   if (method === 'turn/started' || method === 'turn/completed') {
-    return {
+    return trimWindow({
       ...state,
+      activeTurn:
+        method === 'turn/started'
+          ? { ...params.turn, items: [] }
+          : state.activeTurn?.id === params.turn.id
+            ? null
+            : state.activeTurn,
       turns: mergeTurns(state.turns, [params.turn]),
       error: params.turn.error?.message
-    }
+    })
   }
   if (
     !params.turnId ||
     (!method.startsWith('item/') && method !== 'item/started' && method !== 'item/completed')
   )
     return state
-  const turns: CodexRecord[] = state.turns.map((turn) => ({ ...turn, items: [...turn.items] }))
-  let turn = turns.find((item) => item.id === params.turnId)
+  const turns: CodexRecord[] = [...state.turns]
+  const turnIndex = turns.findIndex((item) => item.id === params.turnId)
+  let turn: CodexRecord | undefined =
+    turnIndex < 0 ? undefined : { ...turns[turnIndex], items: [...turns[turnIndex].items] }
+  if (turn) turns[turnIndex] = turn
   if (!turn) {
     turn = { id: params.turnId, items: [], status: 'inProgress' }
     turns.push(turn)
@@ -78,6 +134,7 @@ export function reduceEvent(
       index = turn.items.length
       turn.items.push({
         id: params.itemId,
+        webTurnId: params.turnId,
         type: method.includes('reasoning')
           ? 'reasoning'
           : method.includes('commandExecution')
@@ -86,18 +143,23 @@ export function reduceEvent(
       })
     }
     const item = { ...turn.items[index] }
-    if (method === 'item/agentMessage/delta') item.text = (item.text || '') + params.delta
+    if (method === 'item/agentMessage/delta') {
+      const text = (item.text || '') + params.delta
+      item.text = text.slice(0, HISTORY_TEXT_LIMIT)
+      if (text.length > HISTORY_TEXT_LIMIT) item.webDeferred = true
+    }
     if (method === 'item/commandExecution/outputDelta')
       item.aggregatedOutput = ((item.aggregatedOutput || '') + params.delta).slice(-200000)
     if (method === 'item/reasoning/summaryTextDelta' || method === 'item/reasoning/textDelta') {
       const key = method.includes('summary') ? 'summary' : 'content'
       const part = params.summaryIndex ?? params.contentIndex ?? 0
       item[key] = [...(item[key] || [])]
-      item[key][part] = (item[key][part] || '') + params.delta
+      item[key][part] = ((item[key][part] || '') + params.delta).slice(0, 2000)
+      item.webDeferred = true
     }
     turn.items[index] = item
   }
-  return { ...state, turns }
+  return trimWindow({ ...state, turns })
 }
 
 export function statusLabel(status?: CodexRecord): { text: string; kind: string } {

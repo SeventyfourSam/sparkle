@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client'
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -11,9 +11,35 @@ import { useGateway } from './client'
 import { DirectoryPicker } from './directory-picker'
 import { SessionStatus } from './status-line'
 import { ModelSettings } from './model-settings'
+import { useComposerEditing } from './composer-editing'
+import { usePageGestures } from './page-gestures'
+import {
+  ContentBase,
+  ContentLink,
+  ContentScope,
+  LinkedPre,
+  LinkedText,
+  remarkContentLinks
+} from './content-links'
+import { FileView } from './file-view'
+import { useHistoryWindow } from './history-window'
 import { groupConversationItems } from './tool-groups'
 import { codexWebCommands, parseCodexWebCommand } from '../../../../shared/codex-web-commands'
-import { emptyConversation, mergeTurns, reduceEvent, statusLabel, type Conversation } from './state'
+import {
+  emptyConversation,
+  mergeTurns,
+  reduceEvent,
+  trimWindow,
+  statusLabel,
+  type Conversation
+} from './state'
+import {
+  DeferredSection,
+  HistoryContext,
+  LazyDetails,
+  LazyDiff,
+  publishDetail
+} from './lazy-details'
 import './style.css'
 
 type Selection = { instanceId: string; threadId: string }
@@ -82,16 +108,19 @@ function Icon({ name, size = 20 }: { name: string; size?: number }): React.JSX.E
     </svg>
   )
 }
-function Mark({ children }: { children: string }): React.JSX.Element {
+const Mark = memo(function Mark({ children }: { children: string }): React.JSX.Element {
   return (
     <div className="markdown">
       <Markdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkContentLinks]}
+        urlTransform={(url) => url}
         components={{
-          a: ({ children, href }) => (
-            <a href={href} target="_blank" rel="noreferrer">
-              {children}
-            </a>
+          a: ({ children, href }) => <ContentLink href={href}>{children}</ContentLink>,
+          pre: ({ children }) => <LinkedPre>{children}</LinkedPre>,
+          img: ({ src, alt }) => (
+            <ContentLink href={typeof src === 'string' ? src : undefined}>
+              {alt || '图片'}
+            </ContentLink>
           )
         }}
       >
@@ -99,7 +128,7 @@ function Mark({ children }: { children: string }): React.JSX.Element {
       </Markdown>
     </div>
   )
-}
+})
 function Badge({ status }: { status?: CodexRecord }): React.JSX.Element {
   const label = statusLabel(status)
   return (
@@ -110,7 +139,7 @@ function Badge({ status }: { status?: CodexRecord }): React.JSX.Element {
   )
 }
 
-function Item({ item }: { item: CodexRecord }): React.JSX.Element | null {
+const Item = memo(function Item({ item }: { item: CodexRecord }): React.JSX.Element | null {
   if (item.type === 'userMessage') {
     return (
       <div className="message user">
@@ -118,7 +147,7 @@ function Item({ item }: { item: CodexRecord }): React.JSX.Element | null {
         {(item.content || []).map((input: CodexRecord, index: number) =>
           input.type === 'text' ? (
             <div key={index} className="user-text">
-              {input.text}
+              <LinkedText text={input.text} />
             </div>
           ) : (
             <div key={index} className="attachment">
@@ -127,6 +156,20 @@ function Item({ item }: { item: CodexRecord }): React.JSX.Element | null {
                 : input.name || input.path || input.type}
             </div>
           )
+        )}
+        {item.webDeferred && (
+          <LazyDetails
+            item={item}
+            summary="加载完整消息"
+            render={(full) => (
+              <pre>
+                {full.content
+                  ?.filter((entry: CodexRecord) => entry.type === 'text')
+                  .map((entry: CodexRecord) => entry.text)
+                  .join('\n')}
+              </pre>
+            )}
+          />
         )}
       </div>
     )
@@ -139,19 +182,31 @@ function Item({ item }: { item: CodexRecord }): React.JSX.Element | null {
           Codex{item.phase === 'commentary' && <span>进展</span>}
         </div>
         <Mark>{item.text || ''}</Mark>
+        {item.webDeferred && (
+          <LazyDetails
+            item={item}
+            summary="加载完整消息"
+            render={(full) => <Mark>{full.text || ''}</Mark>}
+          />
+        )}
       </div>
     )
   if (item.type === 'reasoning') {
-    const text = [...(item.summary || []), ...(item.content || [])].join('\n\n')
-    return text ? (
-      <details className="tool reasoning">
-        <summary>
-          <span className="tool-symbol">◌</span>思考摘要
-          <Icon name="down" size={14} />
-        </summary>
-        <Mark>{text}</Mark>
-      </details>
-    ) : null
+    return (
+      <LazyDetails
+        item={item}
+        className="tool reasoning"
+        summary={
+          <>
+            <span className="tool-symbol">◌</span>思考摘要
+            <Icon name="down" size={14} />
+          </>
+        }
+        render={(full) => (
+          <Mark>{[...(full.summary || []), ...(full.content || [])].join('\n\n')}</Mark>
+        )}
+      />
+    )
   }
   if (item.type === 'plan')
     return (
@@ -178,34 +233,64 @@ function Item({ item }: { item: CodexRecord }): React.JSX.Element | null {
     (item.tool
       ? `${item.server ? `${item.server} / ` : ''}${item.tool}`
       : label[item.type] || item.type)
-  const result =
-    item.aggregatedOutput || item.text || (typeof item.output === 'string' ? item.output : '')
   const failed =
     item.status === 'failed' || (typeof item.exitCode === 'number' && item.exitCode !== 0)
   return (
-    <details className={`tool ${failed ? 'failed' : ''}`}>
-      <summary>
-        <span className={`tool-symbol ${item.status === 'inProgress' ? 'spinning' : ''}`}>
-          {failed ? '!' : item.status === 'inProgress' ? '◌' : '✓'}
-        </span>
-        <span className="tool-title">{title}</span>
-        {item.durationMs != null && (
-          <span className="tool-duration">{(item.durationMs / 1000).toFixed(1)}s</span>
-        )}
-        <Icon name="down" size={14} />
-      </summary>
-      {item.cwd && <div className="tool-meta">{item.cwd}</div>}
-      {result && <pre>{result}</pre>}
+    <LazyDetails
+      item={item}
+      className={`tool ${failed ? 'failed' : ''}`}
+      summary={
+        <>
+          <span className={`tool-symbol ${item.status === 'inProgress' ? 'spinning' : ''}`}>
+            {failed ? '!' : item.status === 'inProgress' ? '◌' : '✓'}
+          </span>
+          <span className="tool-title">{title}</span>
+          {item.durationMs != null && (
+            <span className="tool-duration">{(item.durationMs / 1000).toFixed(1)}s</span>
+          )}
+          <Icon name="down" size={14} />
+        </>
+      }
+      render={(full) => (
+        <ContentBase cwd={full.cwd || item.cwd}>
+          <ToolBody item={full} />
+        </ContentBase>
+      )}
+    />
+  )
+})
+
+function ToolBody({ item }: { item: CodexRecord }): React.JSX.Element {
+  const result =
+    item.aggregatedOutput || item.text || (typeof item.output === 'string' ? item.output : '')
+  return (
+    <>
+      {item.cwd && (
+        <div className="tool-meta">
+          <ContentLink href={item.cwd}>{item.cwd}</ContentLink>
+        </div>
+      )}
+      {result && (
+        <pre>
+          <LinkedText text={result} />
+        </pre>
+      )}
       {item.changes?.map((change: CodexRecord, index: number) => (
         <div className="file-change" key={index}>
-          <div className="tool-meta">{change.path}</div>
-          <pre>{change.diff || JSON.stringify(change.kind)}</pre>
+          <div className="tool-meta">
+            <ContentLink href={change.path}>{change.path}</ContentLink>
+          </div>
+          <pre>
+            <LinkedText text={change.diff || JSON.stringify(change.kind)} />
+          </pre>
         </div>
       ))}
       {!result && !item.changes && (
-        <pre>{JSON.stringify(item.result || item.arguments || item, null, 2)}</pre>
+        <pre>
+          <LinkedText text={JSON.stringify(item.result || item.arguments || item, null, 2)} />
+        </pre>
       )}
-    </details>
+    </>
   )
 }
 
@@ -313,7 +398,52 @@ function RequestCard({
   )
 }
 
-function ConversationItems({ turns }: { turns: CodexRecord[] }): React.JSX.Element {
+function ToolBatch({ items }: { items: CodexRecord[] }): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [limit, setLimit] = useState(20)
+  const failed = items.filter(
+    (item) => item.status === 'failed' || (typeof item.exitCode === 'number' && item.exitCode !== 0)
+  ).length
+  const running = items.some((item) => item.status === 'inProgress' || item.status === 'running')
+  return (
+    <details
+      className="tool-group"
+      onToggle={(event) => {
+        setOpen(event.currentTarget.open)
+        if (!event.currentTarget.open) setLimit(20)
+      }}
+    >
+      <summary>
+        <Icon name="terminal" size={16} />
+        <span>工具调用与修改 · {items.length} 项</span>
+        {!!failed && <small className="tool-group-error">{failed} 项失败</small>}
+        {running && <small>进行中</small>}
+        <Icon name="down" size={14} />
+      </summary>
+      {open && (
+        <div className="tool-group-items">
+          {items.slice(0, limit).map((item) => (
+            <Item key={item.id} item={item} />
+          ))}
+          {limit < items.length && (
+            <button
+              className="load-older"
+              onClick={() => setTimeout(() => setLimit((value) => value + 20), 0)}
+            >
+              加载更多操作
+            </button>
+          )}
+        </div>
+      )}
+    </details>
+  )
+}
+
+const ConversationItems = memo(function ConversationItems({
+  turns
+}: {
+  turns: CodexRecord[]
+}): React.JSX.Element {
   return (
     <>
       {groupConversationItems(turns).map((group) => {
@@ -329,36 +459,25 @@ function ConversationItems({ turns }: { turns: CodexRecord[] }): React.JSX.Eleme
               任务已停止，可以继续发消息
             </div>
           )
-        if (!group.tools) return <Item key={group.id} item={group.items[0]} />
-        const failed = group.items.filter(
-          (item) =>
-            item.status === 'failed' || (typeof item.exitCode === 'number' && item.exitCode !== 0)
-        ).length
-        const running = group.items.some(
-          (item) => item.status === 'inProgress' || item.status === 'running'
-        )
-        return (
-          <details className="tool-group" key={group.id}>
-            <summary>
-              <Icon name="terminal" size={16} />
-              <span>工具调用与修改 · {group.items.length} 项</span>
-              {!!failed && <small className="tool-group-error">{failed} 项失败</small>}
-              {running && <small>进行中</small>}
-              <Icon name="down" size={14} />
-            </summary>
-            <div className="tool-group-items">
-              {group.items.map((item) => (
-                <Item key={item.id} item={item} />
-              ))}
+        if (!group.tools)
+          return (
+            <div key={group.id} data-history-id={group.id}>
+              <Item item={group.items[0]} />
             </div>
-          </details>
+          )
+        return (
+          <div key={group.id} data-history-id={group.id}>
+            <ToolBatch items={group.items} />
+          </div>
         )
       })}
     </>
   )
-}
+})
 
 function App(): React.JSX.Element {
+  usePageGestures()
+  const composerEditing = useComposerEditing()
   const [instances, setInstances] = useState<CodexInstance[]>([])
   const [requests, setRequests] = useState<Record<string, CodexPendingRequest[]>>({})
   const [selection, setSelection] = useState<Selection>()
@@ -366,11 +485,10 @@ function App(): React.JSX.Element {
   selectionRef.current = selection
   const [conversation, setConversation] = useState(emptyConversation)
   const [draft, setDraft] = useState('')
+  const draftRef = useRef(draft)
+  draftRef.current = draft
   const drafts = useRef(new Map<string, string>())
-  const [search, setSearch] = useState('')
-  const [filter, setFilter] = useState('all')
   const [busy, setBusy] = useState(false)
-  const [olderBusy, setOlderBusy] = useState(false)
   const [showScrollBottom, setShowScrollBottom] = useState(false)
   const [statusExpanded, setStatusExpanded] = useState(false)
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false)
@@ -399,6 +517,32 @@ function App(): React.JSX.Element {
     if (message.type === 'requests')
       setRequests((old) => ({ ...old, [message.instanceId]: message.requests }))
     const selected = selectionRef.current
+    if (message.type === 'events') {
+      const eventsForThread = message.events.filter((event: CodexRecord) => {
+        if (
+          !selected ||
+          event.instanceId !== selected.instanceId ||
+          (event.threadId && event.threadId !== selected.threadId) ||
+          (event.params?.threadId && event.params.threadId !== selected.threadId)
+        )
+          return false
+        if (event.type === 'detail') {
+          publishDetail(event)
+          return false
+        }
+        return true
+      })
+      if (hydrating.current) events.current.push(...eventsForThread)
+      else if (eventsForThread.length)
+        setConversation((old) =>
+          eventsForThread.reduce(
+            (value: Conversation, event: CodexRecord) =>
+              reduceEvent(value, event.method, event.params),
+            old
+          )
+        )
+      return
+    }
     if (!selected || message.instanceId !== selected.instanceId) return
     if (message.type === 'history' && message.threadId === selected.threadId) {
       hydrating.current = false
@@ -407,12 +551,17 @@ function App(): React.JSX.Element {
           ...old,
           thread: message.thread,
           turns: message.turns,
-          nextCursor: message.nextCursor,
+          nextCursor: message.olderCursor ?? message.nextCursor,
+          newerCursor: message.newerCursor,
+          activeTurn: message.activeTurn,
           tokenUsage: message.tokenUsage,
           goal: message.goal,
           rateLimits: message.rateLimits,
           plan: message.plan,
-          diff: message.diff,
+          diffAvailable: message.diffAvailable,
+          historyNotice: message.historyNotice,
+          browsingHistory: false,
+          windowTrimmed: false,
           loading: false,
           subscribed: true,
           error: undefined
@@ -422,7 +571,7 @@ function App(): React.JSX.Element {
           if (!event.method.endsWith('Delta') && !event.method.endsWith('/delta'))
             next = reduceEvent(next, event.method, event.params)
         events.current = []
-        return next
+        return trimWindow(next)
       })
       return
     }
@@ -432,6 +581,16 @@ function App(): React.JSX.Element {
       else setConversation((old) => reduceEvent(old, message.method, message.params))
     }
     if (message.type === 'error') setToast(message.error)
+  })
+  const historyWindow = useHistoryWindow({
+    conversation,
+    target: selection,
+    command,
+    scroller,
+    nearBottom,
+    online: connected && !!instances.find((item) => item.id === selection?.instanceId)?.ready,
+    adoptLatest: (turns) =>
+      setConversation((old) => trimWindow({ ...old, turns: mergeTurns(turns, old.turns) }))
   })
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -462,7 +621,8 @@ function App(): React.JSX.Element {
     })
   }, [selection, connected, command, syncVersion])
   useEffect(() => {
-    if (nearBottom.current) bottom.current?.scrollIntoView({ behavior: 'instant', block: 'end' })
+    const node = scroller.current
+    if (nearBottom.current && node) node.scrollTop = node.scrollHeight
   }, [conversation.turns, conversation.loading, requests])
   useEffect(() => {
     const node = scroller.current
@@ -470,13 +630,14 @@ function App(): React.JSX.Element {
     if (!node || !content) return
     const observer = new ResizeObserver(() => {
       if (nearBottom.current) node.scrollTop = node.scrollHeight
-      nearBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 160
+      nearBottom.current =
+        !historyWindow.browsing && node.scrollHeight - node.scrollTop - node.clientHeight < 160
       setShowScrollBottom(!nearBottom.current)
     })
     observer.observe(node)
     observer.observe(content)
     return () => observer.disconnect()
-  }, [selection])
+  }, [selection, historyWindow.browsing])
   useEffect(() => {
     if (!createDialog.current?.open) return
     if (!instances.some((item) => item.ready && item.id === newInstance)) {
@@ -487,7 +648,8 @@ function App(): React.JSX.Element {
   const instance = instances.find((item) => item.id === selection?.instanceId)
   const metadata = instance?.threads.find((thread) => thread.id === selection?.threadId)
   const thread = conversation.thread || metadata
-  const activeTurn = conversation.turns.findLast((turn) => turn.status === 'inProgress')
+  const activeTurn =
+    conversation.activeTurn || conversation.turns.findLast((turn) => turn.status === 'inProgress')
   const pending = selection
     ? (requests[selection.instanceId] || []).filter(
         (request) => request.params.threadId === selection.threadId
@@ -497,19 +659,7 @@ function App(): React.JSX.Element {
   const allThreads = instances.flatMap((item) =>
     item.threads.map((entry) => ({ thread: entry, instance: item }))
   )
-  const activeCount = allThreads.filter((entry) => entry.thread.status?.type === 'active').length
-  const attentionCount = allThreads.filter(
-    (entry) => statusLabel(entry.thread.status).kind === 'attention'
-  ).length
-  const visible = allThreads
-    .filter(({ thread, instance }) => {
-      if (filter === 'active' && thread.status?.type !== 'active') return false
-      if (filter === 'attention' && statusLabel(thread.status).kind !== 'attention') return false
-      return `${thread.name || ''} ${thread.preview || ''} ${thread.cwd} ${instance.pid}`
-        .toLowerCase()
-        .includes(search.toLowerCase())
-    })
-    .sort((a, b) => (b.thread.updatedAt || 0) - (a.thread.updatedAt || 0))
+  const visible = allThreads.sort((a, b) => (b.thread.updatedAt || 0) - (a.thread.updatedAt || 0))
 
   const select = (next: Selection): void => {
     if (selection) drafts.current.set(`${selection.instanceId}:${selection.threadId}`, draft)
@@ -535,8 +685,6 @@ function App(): React.JSX.Element {
     setCreateError('')
     try {
       const result = await command('create', { instanceId, cwd: newCwd })
-      setFilter('all')
-      setSearch('')
       select({ instanceId, threadId: result.thread.id })
       createDialog.current?.close()
     } catch (error) {
@@ -575,8 +723,12 @@ function App(): React.JSX.Element {
       const result = await command('send', { ...target, text, turnId: activeTurn?.id })
       drafts.current.delete(`${target.instanceId}:${target.threadId}`)
       if (selectionRef.current === target) {
-        setDraft('')
+        if (draftRef.current === text) {
+          setDraft('')
+          composerEditing.finish()
+        }
         nearBottom.current = true
+        if (!result.webCommand) historyWindow.latest()
         if (result.turn)
           setConversation((old) => reduceEvent(old, 'turn/started', { turn: result.turn }))
         if (result.webCommand?.name === 'goal') setStatusExpanded(true)
@@ -591,7 +743,7 @@ function App(): React.JSX.Element {
   const scrollToBottom = (): void => {
     nearBottom.current = true
     setShowScrollBottom(false)
-    scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' })
+    historyWindow.latest()
   }
   const interrupt = async (): Promise<void> => {
     if (!selection || !activeTurn) return
@@ -604,649 +756,618 @@ function App(): React.JSX.Element {
       setBusy(false)
     }
   }
-  const older = async (): Promise<void> => {
-    if (!selection || !conversation.nextCursor) return
-    const target = selection
-    const node = scroller.current
-    const before = node?.scrollHeight || 0
-    setOlderBusy(true)
-    try {
-      const result = await command('history', { ...target, cursor: conversation.nextCursor })
-      if (selectionRef.current !== target) return
-      nearBottom.current = false
-      setConversation((old) => ({
-        ...old,
-        turns: mergeTurns(result.data.slice().reverse(), old.turns),
-        nextCursor: result.nextCursor
-      }))
-      requestAnimationFrame(() => {
-        if (node) node.scrollTop += node.scrollHeight - before
-      })
-    } catch (error) {
-      setToast(String(error))
-    } finally {
-      setOlderBusy(false)
-    }
-  }
-
+  const historyContext = useMemo(() => ({ target: selection, command }), [selection, command])
+  const linkScope = useMemo(
+    () => (selection ? { ...selection, cwd: thread?.cwd || metadata?.cwd } : undefined),
+    [selection, thread?.cwd, metadata?.cwd]
+  )
+  const composerExpanded =
+    composerEditing.editing ||
+    statusExpanded ||
+    modelSettingsOpen ||
+    showCommandHelp ||
+    !!commandError
   return (
-    <div className={`app ${selection ? 'has-selection' : ''}`}>
-      <aside className="sidebar">
-        <header className="brand-row">
-          <div className="brand-symbol">
-            <Icon name="spark" size={23} />
-          </div>
-          <div className="brand">
-            Codex<span>by Sparkle</span>
-          </div>
-          <button
-            className="icon-button"
-            aria-label="切换明暗主题"
-            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-          >
-            <Icon name="sun" />
-          </button>
-        </header>
-        <div className="sidebar-heading">
-          <div>
-            <span className="eyebrow">WORKSPACE</span>
-            <h1>你的会话</h1>
-          </div>
-          <div className="sidebar-actions">
-            <button
-              className="icon-button"
-              aria-label="刷新会话"
-              disabled={!connected}
-              onClick={() => void command('refresh').catch((error) => setToast(error.message))}
-            >
-              <Icon name="refresh" />
-            </button>
-            <button className="new-session-button" disabled={!connected} onClick={openCreate}>
-              <Icon name="plus" size={17} />
-              新建
-            </button>
-          </div>
-        </div>
-        <div className="overview">
-          <div>
-            <strong>{allThreads.length}</strong>
-            <span>会话</span>
-          </div>
-          <div>
-            <strong>
-              {activeCount}
-              <i className="live-dot" />
-            </strong>
-            <span>进行中</span>
-          </div>
-          <div>
-            <strong>{attentionCount}</strong>
-            <span>等待你</span>
-          </div>
-        </div>
-        <label className="search">
-          <Icon name="search" size={18} />
-          <input
-            aria-label="搜索会话"
-            placeholder="搜索会话或工作目录"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-          <kbd>⌕</kbd>
-        </label>
-        <div className="filters" role="tablist" aria-label="会话筛选">
-          {[
-            ['all', '全部'],
-            ['active', '进行中'],
-            ['attention', '等待处理']
-          ].map(([key, label]) => (
-            <button
-              role="tab"
-              aria-selected={filter === key}
-              className={filter === key ? 'selected' : ''}
-              key={key}
-              onClick={() => setFilter(key)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <div className="thread-list">
-          {!visible.length && (
-            <div className="empty-list">
-              <Icon name="terminal" size={32} />
-              <h3>{allThreads.length ? '没有匹配的会话' : '等待 Codex 接入'}</h3>
-              <p>
-                {allThreads.length
-                  ? '试试其他关键词或筛选条件'
-                  : '在 Codex 中手动配置本机接入端口后，重启对应的 Codex。连接成功的会话会自动显示在这里。'}
-              </p>
-            </div>
-          )}
-          {visible.map(({ thread, instance }) => (
-            <button
-              className={`thread-card ${selection?.instanceId === instance.id && selection.threadId === thread.id ? 'selected' : ''}`}
-              key={`${instance.id}:${thread.id}`}
-              onClick={() => select({ instanceId: instance.id, threadId: thread.id })}
-            >
-              <div className="thread-card-top">
-                <span className="project">
-                  <Icon name="folder" size={13} />
-                  {folder(thread.cwd)}
-                </span>
-                <time>{time(thread.updatedAt)}</time>
-              </div>
-              <h2>{thread.name || thread.preview || '未命名会话'}</h2>
-              <p>{thread.preview || thread.cwd}</p>
-              <div className="thread-card-bottom">
-                <Badge status={instance.ready ? thread.status : { type: 'offline' }} />
-                <span>
-                  {runtimeName(instance.runtime)} · {instance.pid}
-                </span>
-              </div>
-            </button>
-          ))}
-        </div>
-        <footer className="sidebar-footer">
-          <span className={`connection ${connected ? 'online' : ''}`}>
-            <i />
-            {connected ? '已连接 Sparkle' : '正在重新连接…'}
-          </span>
-          <button className="servers-button" onClick={() => serversDialog.current?.showModal()}>
-            {instances.filter((item) => item.ready).length} 个服务
-            <Icon name="arrow" size={12} />
-          </button>
-        </footer>
-      </aside>
-      <main className="conversation">
-        {!selection ? (
-          <div className="welcome">
-            <div className="welcome-symbol">
-              <Icon name="spark" size={38} />
-            </div>
-            <span className="eyebrow">CODEX, WITHIN REACH</span>
-            <h2>随时接着做。</h2>
-            <p>
-              查看进展，给出下一步指令。
-              <br />
-              从左侧选择一个会话开始。
-            </p>
-            <div className="welcome-hint">
-              <span className="live-dot" />
-              与终端里的 Codex 实时同步
-            </div>
-          </div>
-        ) : (
-          <>
-            <header className="chat-header">
-              <button className="icon-button back-button" aria-label="返回会话列表" onClick={back}>
-                <Icon name="back" />
+    <ContentScope.Provider value={linkScope}>
+      <HistoryContext.Provider value={historyContext}>
+        <div className={`app ${selection ? 'has-selection' : ''}`}>
+          <aside className="sidebar">
+            <header className="sidebar-create">
+              <button className="new-session-button" disabled={!connected} onClick={openCreate}>
+                <Icon name="plus" size={17} />
+                新建会话
               </button>
-              <div className="chat-title">
-                <h1>{metadata?.name || thread?.name || metadata?.preview || 'Codex 会话'}</h1>
-                <div>
-                  <span>{folder(thread?.cwd || metadata?.cwd)}</span>
-                  <span>·</span>
-                  <span>
-                    {runtimeName(instance?.runtime || '')} {instance?.pid}
-                  </span>
-                </div>
-              </div>
-              <Badge status={online ? metadata?.status || thread?.status : { type: 'offline' }} />
             </header>
-            {!!pending.length && (
-              <button className="pending-banner" onClick={scrollToBottom}>
-                <span className="request-dot" />有 {pending.length} 项等待你的处理
-                <Icon name="down" size={14} />
-              </button>
-            )}
-            {!online && (
-              <div className="connection-banner" role="status">
-                {connected
-                  ? 'app-server 已离线，等待自动重连。'
-                  : '与 Sparkle 的连接已断开，正在重连。'}
-                你的输入会保留。
-              </div>
-            )}
-            <div className="message-viewport">
-              <div
-                className="message-scroller"
-                ref={scroller}
-                onClickCapture={(event) => {
-                  const summary = (event.target as HTMLElement).closest('summary')
-                  if (
-                    summary?.parentElement instanceof HTMLDetailsElement &&
-                    !summary.parentElement.open
-                  )
-                    nearBottom.current = false
-                }}
-                onScroll={() => {
-                  const node = scroller.current
-                  if (node) {
-                    nearBottom.current =
-                      node.scrollHeight - node.scrollTop - node.clientHeight < 160
-                    setShowScrollBottom(!nearBottom.current)
-                  }
-                }}
-              >
-                <div className="messages">
-                  <div className="session-intro">
-                    <Icon name="terminal" size={18} />
-                    <span>{thread?.cwd || metadata?.cwd}</span>
-                  </div>
-                  {conversation.nextCursor && (
-                    <button
-                      className="load-older"
-                      disabled={olderBusy || !online}
-                      onClick={() => void older()}
-                    >
-                      {olderBusy ? '正在加载…' : '查看更早的消息'}
-                    </button>
-                  )}
-                  {conversation.loading ? (
-                    <div className="loading">
-                      <span className="loading-dot" />
-                      正在同步会话…
-                    </div>
-                  ) : (
-                    <>
-                      {!conversation.turns.length && !conversation.error && (
-                        <div className="chat-empty">
-                          <Icon name="spark" size={28} />
-                          <h2>准备就绪</h2>
-                          <p>发一条消息，继续这段会话。</p>
-                        </div>
-                      )}
-                      <ConversationItems turns={conversation.turns} />
-                      {conversation.plan && (
-                        <details className="tool plan">
-                          <summary>
-                            <Icon name="check" size={16} />
-                            工作计划
-                            <Icon name="down" size={14} />
-                          </summary>
-                          {conversation.plan.map((step, index) => (
-                            <div className={`plan-step ${step.status}`} key={index}>
-                              <span>
-                                {step.status === 'completed'
-                                  ? '✓'
-                                  : step.status === 'inProgress'
-                                    ? '◌'
-                                    : '○'}
-                              </span>
-                              {step.step}
-                            </div>
-                          ))}
-                        </details>
-                      )}
-                      {conversation.diff && (
-                        <details className="tool">
-                          <summary>
-                            本轮代码修改
-                            <Icon name="down" size={14} />
-                          </summary>
-                          <pre>{conversation.diff}</pre>
-                        </details>
-                      )}
-                      {pending.map((request) => (
-                        <RequestCard
-                          key={request.key}
-                          request={request}
-                          disabled={!online}
-                          respond={async (value) => {
-                            try {
-                              await command('respond', {
-                                instanceId: selection.instanceId,
-                                key: request.key,
-                                ...value
-                              })
-                            } catch (error) {
-                              setToast(String(error))
-                            }
-                          }}
-                        />
-                      ))}
-                      {activeTurn && !pending.length && (
-                        <div className="working">
-                          <span className="loading-dot" />
-                          Codex 正在工作
-                          <span className="working-bars">
-                            <i />
-                            <i />
-                            <i />
-                          </span>
-                        </div>
-                      )}
-                      {conversation.error && (
-                        <div className="inline-error" role="alert">
-                          {conversation.error}
-                          <button
-                            className="button secondary retry-button"
-                            disabled={!online}
-                            onClick={() => setSyncVersion((value) => value + 1)}
-                          >
-                            重新同步会话
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
-                  <div ref={bottom} />
+            <div className="thread-list">
+              {!visible.length && (
+                <div className="empty-list">
+                  <Icon name="terminal" size={32} />
+                  <h3>等待 Codex 接入</h3>
+                  <p>
+                    在 Codex 中手动配置本机接入端口后，重启对应的
+                    Codex。连接成功的会话会自动显示在这里。
+                  </p>
                 </div>
-              </div>
-              {showScrollBottom && (
+              )}
+              {visible.map(({ thread, instance }) => (
                 <button
-                  type="button"
-                  className="scroll-to-bottom"
-                  aria-label="回到底部"
-                  onClick={scrollToBottom}
+                  className={`thread-card ${selection?.instanceId === instance.id && selection.threadId === thread.id ? 'selected' : ''}`}
+                  key={`${instance.id}:${thread.id}`}
+                  onClick={() => select({ instanceId: instance.id, threadId: thread.id })}
                 >
-                  <Icon name="down" size={17} />
-                  回到底部
+                  <div className="thread-card-top">
+                    <span className="project">
+                      <Icon name="folder" size={13} />
+                      {folder(thread.cwd)}
+                    </span>
+                    <time>{time(thread.updatedAt)}</time>
+                  </div>
+                  <h2>{thread.name || thread.preview || '未命名会话'}</h2>
+                  <p>{thread.preview || thread.cwd}</p>
+                  <div className="thread-card-bottom">
+                    <Badge status={instance.ready ? thread.status : { type: 'offline' }} />
+                    <span>
+                      {runtimeName(instance.runtime)} · {instance.pid}
+                    </span>
+                  </div>
                 </button>
-              )}
+              ))}
             </div>
-            <div className="composer-wrap">
-              <SessionStatus
-                thread={{ ...metadata, ...thread }}
-                conversation={conversation}
-                expanded={statusExpanded}
-                onToggle={() => setStatusExpanded((value) => !value)}
-                onEditSettings={() => setModelSettingsOpen(true)}
-                settingsDisabled={!online || conversation.loading || !conversation.subscribed}
-              />
-              {(showCommandHelp ||
-                (!dismissCommandSuggestions && /^\/[a-z-]*$/i.test(draft.trim()))) && (
-                <div className="command-help" aria-label="网页命令">
-                  <div className="command-help-heading">
-                    <span>网页命令</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowCommandHelp(false)
-                        setDismissCommandSuggestions(true)
-                      }}
-                      aria-label="关闭命令帮助"
-                    >
-                      ×
-                    </button>
-                  </div>
-                  {codexWebCommands
-                    .filter(
-                      (item) =>
-                        showCommandHelp || item.name.startsWith(draft.trim().slice(1).toLowerCase())
-                    )
-                    .map((item) => (
-                      <button
-                        type="button"
-                        key={item.name}
-                        onClick={() => {
-                          setDraft(`/${item.name}${item.name === 'goal' ? ' ' : ''}`)
-                          setShowCommandHelp(false)
-                          setDismissCommandSuggestions(true)
-                          setCommandError('')
-                        }}
-                      >
-                        <strong>/{item.name}</strong>
-                        <span>{showCommandHelp ? item.usage : item.description}</span>
-                      </button>
-                    ))}
-                  {showCommandHelp && <p>/side 暂需 Codex 提供旁支会话接口。</p>}
-                </div>
-              )}
-              {commandError && (
-                <div className="command-error" role="alert">
-                  {commandError}
-                </div>
-              )}
-              <form
-                className={`composer ${!online ? 'disabled' : ''}`}
-                onSubmit={(event) => void send(event)}
+            <footer className="sidebar-footer">
+              <button
+                className="icon-button"
+                aria-label="切换明暗主题"
+                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
               >
-                <textarea
-                  aria-label="发送给 Codex 的消息"
-                  placeholder={activeTurn ? '追加指令，不打断当前任务…' : '给 Codex 发消息…'}
-                  rows={1}
-                  value={draft}
-                  onChange={(event) => {
-                    setDraft(event.target.value)
-                    setCommandError('')
-                    setDismissCommandSuggestions(false)
-                    event.target.style.height = 'auto'
-                    event.target.style.height = `${Math.min(event.target.scrollHeight, 160)}px`
-                  }}
-                  onKeyDown={(event) => {
-                    if (
-                      event.key === 'Enter' &&
-                      (event.ctrlKey || event.metaKey) &&
-                      !event.nativeEvent.isComposing
-                    ) {
-                      event.preventDefault()
-                      void send(event)
-                    }
-                  }}
-                />
-                <div className="composer-bottom">
-                  <span>
-                    {activeTurn ? '追加到当前任务' : '新的消息'}
-                    <span className="desktop-hint"> · Ctrl ↵ 发送</span>
+                <Icon name="sun" size={16} />
+              </button>
+              <span className={`connection ${connected ? 'online' : ''}`}>
+                <i />
+                {connected ? '已连接 Sparkle' : '正在重新连接…'}
+              </span>
+              <button className="servers-button" onClick={() => serversDialog.current?.showModal()}>
+                {instances.filter((item) => item.ready).length} 个服务
+                <Icon name="arrow" size={12} />
+              </button>
+            </footer>
+          </aside>
+          <main className="conversation">
+            {!selection ? (
+              <div className="welcome">
+                <div className="welcome-symbol">
+                  <Icon name="spark" size={38} />
+                </div>
+                <span className="eyebrow">CODEX, WITHIN REACH</span>
+                <h2>随时接着做。</h2>
+                <p>
+                  查看进展，给出下一步指令。
+                  <br />
+                  从左侧选择一个会话开始。
+                </p>
+                <div className="welcome-hint">
+                  <span className="live-dot" />
+                  与终端里的 Codex 实时同步
+                </div>
+              </div>
+            ) : (
+              <>
+                <header className="chat-header">
+                  <button
+                    className="icon-button back-button"
+                    aria-label="返回会话列表"
+                    onClick={back}
+                  >
+                    <Icon name="back" />
+                  </button>
+                  <div className="chat-title">
+                    <h1>{metadata?.name || thread?.name || metadata?.preview || 'Codex 会话'}</h1>
+                    <div>
+                      <span>{folder(thread?.cwd || metadata?.cwd)}</span>
+                      <span>·</span>
+                      <span>
+                        {runtimeName(instance?.runtime || '')} {instance?.pid}
+                      </span>
+                    </div>
+                  </div>
+                  <Badge
+                    status={online ? metadata?.status || thread?.status : { type: 'offline' }}
+                  />
+                </header>
+                {!!pending.length && (
+                  <button className="pending-banner" onClick={scrollToBottom}>
+                    <span className="request-dot" />有 {pending.length} 项等待你的处理
+                    <Icon name="down" size={14} />
+                  </button>
+                )}
+                {!online && (
+                  <div className="connection-banner" role="status">
+                    {connected
+                      ? 'app-server 已离线，等待自动重连。'
+                      : '与 Sparkle 的连接已断开，正在重连。'}
+                    你的输入会保留。
+                  </div>
+                )}
+                <div className="message-viewport">
+                  <div
+                    className="message-scroller"
+                    ref={scroller}
+                    onClickCapture={(event) => {
+                      const summary = (event.target as HTMLElement).closest('summary')
+                      if (
+                        summary?.parentElement instanceof HTMLDetailsElement &&
+                        !summary.parentElement.open
+                      )
+                        nearBottom.current = false
+                    }}
+                    onScroll={() => {
+                      const node = scroller.current
+                      if (node) {
+                        nearBottom.current =
+                          !historyWindow.browsing &&
+                          node.scrollHeight - node.scrollTop - node.clientHeight < 160
+                        setShowScrollBottom(!nearBottom.current)
+                      }
+                    }}
+                  >
+                    <div className="messages">
+                      <div className="session-intro">
+                        <Icon name="terminal" size={18} />
+                        <span>{thread?.cwd || metadata?.cwd}</span>
+                      </div>
+                      {conversation.historyNotice && (
+                        <div className="lazy-notice">{conversation.historyNotice}</div>
+                      )}
+                      <div className="history-edge" aria-live="polite">
+                        {historyWindow.loading ? (
+                          '正在加载历史…'
+                        ) : historyWindow.error ? (
+                          <button onClick={historyWindow.older}>加载失败，点击重试</button>
+                        ) : historyWindow.hasOlder ? (
+                          '上滑查看更早的消息'
+                        ) : (
+                          '已到最早的消息'
+                        )}
+                      </div>
+                      {conversation.loading ? (
+                        <div className="loading">
+                          <span className="loading-dot" />
+                          正在同步会话…
+                        </div>
+                      ) : (
+                        <>
+                          {!historyWindow.turns.length && !conversation.error && (
+                            <div className="chat-empty">
+                              <Icon name="spark" size={28} />
+                              <h2>准备就绪</h2>
+                              <p>发一条消息，继续这段会话。</p>
+                            </div>
+                          )}
+                          <div data-history-spacer="top" aria-hidden="true" />
+                          <ConversationItems turns={historyWindow.turns} />
+                          <div data-history-spacer="bottom" aria-hidden="true" />
+                          {conversation.plan && (
+                            <DeferredSection
+                              className="tool plan"
+                              summary={
+                                <>
+                                  <Icon name="check" size={16} />
+                                  工作计划
+                                  <Icon name="down" size={14} />
+                                </>
+                              }
+                            >
+                              {() =>
+                                conversation.plan!.map((step, index) => (
+                                  <div className={`plan-step ${step.status}`} key={index}>
+                                    <span>
+                                      {step.status === 'completed'
+                                        ? '✓'
+                                        : step.status === 'inProgress'
+                                          ? '◌'
+                                          : '○'}
+                                    </span>
+                                    <LinkedText text={step.step} />
+                                  </div>
+                                ))
+                              }
+                            </DeferredSection>
+                          )}
+                          {conversation.diffAvailable && (
+                            <DeferredSection
+                              summary={
+                                <>
+                                  本轮代码修改
+                                  <Icon name="down" size={14} />
+                                </>
+                              }
+                            >
+                              {() => <LazyDiff />}
+                            </DeferredSection>
+                          )}
+                          {pending.map((request) => (
+                            <RequestCard
+                              key={request.key}
+                              request={request}
+                              disabled={!online}
+                              respond={async (value) => {
+                                try {
+                                  await command('respond', {
+                                    instanceId: selection.instanceId,
+                                    key: request.key,
+                                    ...value
+                                  })
+                                } catch (error) {
+                                  setToast(String(error))
+                                }
+                              }}
+                            />
+                          ))}
+                          {activeTurn && !pending.length && (
+                            <div className="working">
+                              <span className="loading-dot" />
+                              Codex 正在工作
+                              <span className="working-bars">
+                                <i />
+                                <i />
+                                <i />
+                              </span>
+                            </div>
+                          )}
+                          {conversation.error && (
+                            <div className="inline-error" role="alert">
+                              {conversation.error}
+                              <button
+                                className="button secondary retry-button"
+                                disabled={!online}
+                                onClick={() => setSyncVersion((value) => value + 1)}
+                              >
+                                重新同步会话
+                              </button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      <div ref={bottom} />
+                    </div>
+                  </div>
+                  {(showScrollBottom || historyWindow.browsing) && (
                     <button
                       type="button"
-                      className="command-help-button"
-                      onClick={() => setShowCommandHelp((value) => !value)}
+                      className="scroll-to-bottom"
+                      aria-label="回到底部"
+                      onClick={scrollToBottom}
                     >
-                      {' '}
-                      / 命令
+                      <Icon name="down" size={17} />
                     </button>
-                  </span>
-                  <div className="composer-buttons">
-                    {activeTurn && (
-                      <button
-                        type="button"
-                        className="stop-button"
-                        aria-label="停止当前任务"
-                        disabled={!online || busy}
-                        onClick={() => void interrupt()}
-                      >
-                        <Icon name="stop" size={17} />
-                        停止
-                      </button>
-                    )}
-                    <button
-                      className="send-button"
-                      aria-label={activeTurn ? '追加指令' : '发送消息'}
-                      disabled={
-                        !online ||
-                        busy ||
-                        !draft.trim() ||
-                        conversation.loading ||
-                        !conversation.subscribed
+                  )}
+                </div>
+                <div
+                  ref={composerEditing.ref}
+                  className={`composer-wrap ${composerExpanded ? '' : 'is-compact'}`}
+                >
+                  <SessionStatus
+                    thread={{ ...metadata, ...thread }}
+                    conversation={conversation}
+                    expanded={statusExpanded}
+                    onToggle={() => setStatusExpanded((value) => !value)}
+                    onEditSettings={() => setModelSettingsOpen(true)}
+                    settingsDisabled={!online || conversation.loading || !conversation.subscribed}
+                  />
+                  {(showCommandHelp ||
+                    (!dismissCommandSuggestions && /^\/[a-z-]*$/i.test(draft.trim()))) && (
+                    <div className="command-help" aria-label="网页命令">
+                      <div className="command-help-heading">
+                        <span>网页命令</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowCommandHelp(false)
+                            setDismissCommandSuggestions(true)
+                          }}
+                          aria-label="关闭命令帮助"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      {codexWebCommands
+                        .filter(
+                          (item) =>
+                            showCommandHelp ||
+                            item.name.startsWith(draft.trim().slice(1).toLowerCase())
+                        )
+                        .map((item) => (
+                          <button
+                            type="button"
+                            key={item.name}
+                            onClick={() => {
+                              setDraft(`/${item.name}${item.name === 'goal' ? ' ' : ''}`)
+                              setShowCommandHelp(false)
+                              setDismissCommandSuggestions(true)
+                              setCommandError('')
+                            }}
+                          >
+                            <strong>/{item.name}</strong>
+                            <span>{showCommandHelp ? item.usage : item.description}</span>
+                          </button>
+                        ))}
+                      {showCommandHelp && <p>/side 暂需 Codex 提供旁支会话接口。</p>}
+                    </div>
+                  )}
+                  {commandError && (
+                    <div className="command-error" role="alert">
+                      {commandError}
+                    </div>
+                  )}
+                  <form
+                    className={`composer ${!online ? 'disabled' : ''}`}
+                    onSubmit={(event) => void send(event)}
+                  >
+                    <textarea
+                      aria-label="发送给 Codex 的消息"
+                      placeholder={
+                        !composerExpanded
+                          ? '发消息…'
+                          : activeTurn
+                            ? '追加指令，不打断当前任务…'
+                            : '给 Codex 发消息…'
                       }
-                    >
-                      <Icon name="send" size={21} />
-                    </button>
+                      onFocus={(event) => {
+                        const node = event.currentTarget
+                        requestAnimationFrame(() => {
+                          node.style.height = 'auto'
+                          node.style.height = `${Math.min(node.scrollHeight, 160)}px`
+                        })
+                      }}
+                      rows={1}
+                      value={draft}
+                      onChange={(event) => {
+                        setDraft(event.target.value)
+                        setCommandError('')
+                        setDismissCommandSuggestions(false)
+                        event.target.style.height = 'auto'
+                        event.target.style.height = `${Math.min(event.target.scrollHeight, 160)}px`
+                      }}
+                      onKeyDown={(event) => {
+                        if (
+                          event.key === 'Enter' &&
+                          (event.ctrlKey || event.metaKey) &&
+                          !event.nativeEvent.isComposing
+                        ) {
+                          event.preventDefault()
+                          void send(event)
+                        }
+                      }}
+                    />
+                    <div className="composer-bottom">
+                      <span>
+                        {activeTurn ? '追加到当前任务' : '新的消息'}
+                        <span className="desktop-hint"> · Ctrl ↵ 发送</span>
+                        <button
+                          type="button"
+                          className="command-help-button"
+                          onClick={() => setShowCommandHelp((value) => !value)}
+                        >
+                          {' '}
+                          / 命令
+                        </button>
+                      </span>
+                      <div className="composer-buttons">
+                        {activeTurn && (
+                          <button
+                            type="button"
+                            className="stop-button"
+                            aria-label="停止当前任务"
+                            disabled={!online || busy}
+                            onClick={() => void interrupt()}
+                          >
+                            <Icon name="stop" size={17} />
+                            停止
+                          </button>
+                        )}
+                        <button
+                          className="send-button"
+                          aria-label={activeTurn ? '追加指令' : '发送消息'}
+                          disabled={
+                            !online ||
+                            busy ||
+                            !draft.trim() ||
+                            conversation.loading ||
+                            !conversation.subscribed
+                          }
+                        >
+                          <Icon name="send" size={21} />
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+              </>
+            )}
+          </main>
+          {modelSettingsOpen && selection && thread && (
+            <ModelSettings
+              key={`${selection.instanceId}:${selection.threadId}`}
+              command={command}
+              instanceId={selection.instanceId}
+              thread={{ ...metadata, ...thread }}
+              online={online}
+              onClose={() => setModelSettingsOpen(false)}
+              onSaved={() => setToast('已保存模型与推理强度，将用于后续任务')}
+            />
+          )}
+          <dialog
+            ref={createDialog}
+            aria-label="新建会话"
+            className="create-dialog"
+            onClose={() => setCreateOpen(false)}
+            onCancel={(event) => {
+              if (creating) event.preventDefault()
+            }}
+            onClick={(event) => {
+              if (!creating && event.target === event.currentTarget) createDialog.current?.close()
+            }}
+          >
+            {choosingDirectory && createOpen ? (
+              <DirectoryPicker
+                command={command}
+                initialPath={newCwd}
+                recent={[
+                  ...new Set(
+                    instances.flatMap((item) =>
+                      item.threads
+                        .map((thread) => thread.cwd)
+                        .filter((path): path is string => typeof path === 'string' && !!path)
+                    )
+                  )
+                ]}
+                onSelect={(path) => {
+                  setNewCwd(path)
+                  setCreateError('')
+                  setChoosingDirectory(false)
+                }}
+                onCancel={() => createDialog.current?.close()}
+              />
+            ) : !choosingDirectory && createOpen ? (
+              <form onSubmit={(event) => void create(event)}>
+                <div className="create-heading">
+                  <div>
+                    <span className="eyebrow">NEW SESSION</span>
+                    <h2>新建会话</h2>
                   </div>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label="关闭新建会话"
+                    disabled={creating}
+                    onClick={() => createDialog.current?.close()}
+                  >
+                    <Icon name="close" />
+                  </button>
+                </div>
+                <div className="create-field">
+                  工作目录
+                  <button
+                    type="button"
+                    className="selected-directory"
+                    disabled={creating}
+                    onClick={() => setChoosingDirectory(true)}
+                  >
+                    <Icon name="folder" size={19} />
+                    <span>{newCwd}</span>
+                    <strong>更换</strong>
+                  </button>
+                </div>
+                <label className="create-field">
+                  Codex 服务
+                  <select
+                    aria-label="Codex 服务"
+                    value={newInstance}
+                    disabled={creating || !instances.some((item) => item.ready)}
+                    onChange={(event) => setNewInstance(event.target.value)}
+                  >
+                    {!instances.some((item) => item.ready) && (
+                      <option value="">等待 Codex 接入</option>
+                    )}
+                    {instances
+                      .filter((item) => item.ready)
+                      .map((item) => (
+                        <option value={item.id} key={item.id}>
+                          {runtimeName(item.runtime)} · PID {item.pid}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                {!instances.some((item) => item.ready) && (
+                  <p className="create-note">请先启动已连接 Sparkle 的 Codex，再创建会话。</p>
+                )}
+                {createError && (
+                  <p className="create-error" role="alert">
+                    {createError}
+                  </p>
+                )}
+                <div className="create-actions">
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={creating}
+                    onClick={() => createDialog.current?.close()}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="submit"
+                    className="button primary"
+                    disabled={
+                      !connected ||
+                      creating ||
+                      !newCwd ||
+                      !instances.some((item) => item.ready && item.id === newInstance)
+                    }
+                  >
+                    {creating ? '正在创建…' : '创建会话'}
+                    <Icon name="arrow" size={16} />
+                  </button>
                 </div>
               </form>
-            </div>
-          </>
-        )}
-      </main>
-      {modelSettingsOpen && selection && thread && (
-        <ModelSettings
-          key={`${selection.instanceId}:${selection.threadId}`}
-          command={command}
-          instanceId={selection.instanceId}
-          thread={{ ...metadata, ...thread }}
-          online={online}
-          onClose={() => setModelSettingsOpen(false)}
-          onSaved={() => setToast('已保存模型与推理强度，将用于后续任务')}
-        />
-      )}
-      <dialog
-        ref={createDialog}
-        aria-label="新建会话"
-        className="create-dialog"
-        onClose={() => setCreateOpen(false)}
-        onCancel={(event) => {
-          if (creating) event.preventDefault()
-        }}
-        onClick={(event) => {
-          if (!creating && event.target === event.currentTarget) createDialog.current?.close()
-        }}
-      >
-        {choosingDirectory && createOpen ? (
-          <DirectoryPicker
-            command={command}
-            initialPath={newCwd}
-            recent={[
-              ...new Set(
-                instances.flatMap((item) =>
-                  item.threads
-                    .map((thread) => thread.cwd)
-                    .filter((path): path is string => typeof path === 'string' && !!path)
-                )
-              )
-            ]}
-            onSelect={(path) => {
-              setNewCwd(path)
-              setCreateError('')
-              setChoosingDirectory(false)
+            ) : null}
+          </dialog>
+          <dialog
+            ref={serversDialog}
+            aria-label="app-server 服务实例"
+            className="servers-dialog"
+            onClick={(event) => {
+              if (event.target === event.currentTarget) serversDialog.current?.close()
             }}
-            onCancel={() => createDialog.current?.close()}
-          />
-        ) : !choosingDirectory && createOpen ? (
-          <form onSubmit={(event) => void create(event)}>
-            <div className="create-heading">
+          >
+            <div className="servers-heading">
               <div>
-                <span className="eyebrow">NEW SESSION</span>
-                <h2>新建会话</h2>
+                <span className="eyebrow">APP SERVERS</span>
+                <h2>已接入的服务</h2>
               </div>
-              <button
-                type="button"
-                className="icon-button"
-                aria-label="关闭新建会话"
-                disabled={creating}
-                onClick={() => createDialog.current?.close()}
-              >
-                <Icon name="close" />
-              </button>
+              <form method="dialog">
+                <button className="icon-button" aria-label="关闭服务列表">
+                  <Icon name="close" />
+                </button>
+              </form>
             </div>
-            <div className="create-field">
-              工作目录
-              <button
-                type="button"
-                className="selected-directory"
-                disabled={creating}
-                onClick={() => setChoosingDirectory(true)}
-              >
-                <Icon name="folder" size={19} />
-                <span>{newCwd}</span>
-                <strong>更换</strong>
-              </button>
-            </div>
-            <label className="create-field">
-              Codex 服务
-              <select
-                aria-label="Codex 服务"
-                value={newInstance}
-                disabled={creating || !instances.some((item) => item.ready)}
-                onChange={(event) => setNewInstance(event.target.value)}
-              >
-                {!instances.some((item) => item.ready) && <option value="">等待 Codex 接入</option>}
-                {instances
-                  .filter((item) => item.ready)
-                  .map((item) => (
-                    <option value={item.id} key={item.id}>
-                      {runtimeName(item.runtime)} · PID {item.pid}
-                    </option>
-                  ))}
-              </select>
-            </label>
-            {!instances.some((item) => item.ready) && (
-              <p className="create-note">请先启动已连接 Sparkle 的 Codex，再创建会话。</p>
-            )}
-            {createError && (
-              <p className="create-error" role="alert">
-                {createError}
+            {!instances.length && (
+              <p className="muted">
+                尚无 app-server 接入。启用连接配置后，需要重启已运行的 Codex。
               </p>
             )}
-            <div className="create-actions">
-              <button
-                type="button"
-                className="button secondary"
-                disabled={creating}
-                onClick={() => createDialog.current?.close()}
-              >
-                取消
-              </button>
-              <button
-                type="submit"
-                className="button primary"
-                disabled={
-                  !connected ||
-                  creating ||
-                  !newCwd ||
-                  !instances.some((item) => item.ready && item.id === newInstance)
-                }
-              >
-                {creating ? '正在创建…' : '创建会话'}
-                <Icon name="arrow" size={16} />
+            {instances.map((item) => (
+              <div className="server-row" key={item.id}>
+                <div className="server-row-title">
+                  <Icon name="terminal" size={18} />
+                  <strong>{runtimeName(item.runtime)}</strong>
+                  <span className={`connection ${item.ready ? 'online' : ''}`}>
+                    <i />
+                    {item.ready ? '已连接' : item.connected ? '初始化中' : '离线'}
+                  </span>
+                </div>
+                <p>
+                  PID {item.pid} · {item.threads.length} 个会话
+                </p>
+                <code>{item.id}</code>
+                {item.error && <p className="server-error">{item.error}</p>}
+              </div>
+            ))}
+          </dialog>
+          {toast && (
+            <div className="toast" role="alert">
+              <span>{toast}</span>
+              <button className="icon-button" aria-label="关闭提示" onClick={() => setToast('')}>
+                <Icon name="close" size={16} />
               </button>
             </div>
-          </form>
-        ) : null}
-      </dialog>
-      <dialog
-        ref={serversDialog}
-        aria-label="app-server 服务实例"
-        className="servers-dialog"
-        onClick={(event) => {
-          if (event.target === event.currentTarget) serversDialog.current?.close()
-        }}
-      >
-        <div className="servers-heading">
-          <div>
-            <span className="eyebrow">APP SERVERS</span>
-            <h2>已接入的服务</h2>
-          </div>
-          <form method="dialog">
-            <button className="icon-button" aria-label="关闭服务列表">
-              <Icon name="close" />
-            </button>
-          </form>
+          )}
         </div>
-        {!instances.length && (
-          <p className="muted">尚无 app-server 接入。启用连接配置后，需要重启已运行的 Codex。</p>
-        )}
-        {instances.map((item) => (
-          <div className="server-row" key={item.id}>
-            <div className="server-row-title">
-              <Icon name="terminal" size={18} />
-              <strong>{runtimeName(item.runtime)}</strong>
-              <span className={`connection ${item.ready ? 'online' : ''}`}>
-                <i />
-                {item.ready ? '已连接' : item.connected ? '初始化中' : '离线'}
-              </span>
-            </div>
-            <p>
-              PID {item.pid} · {item.threads.length} 个会话
-            </p>
-            <code>{item.id}</code>
-            {item.error && <p className="server-error">{item.error}</p>}
-          </div>
-        ))}
-      </dialog>
-      {toast && (
-        <div className="toast" role="alert">
-          <span>{toast}</span>
-          <button className="icon-button" aria-label="关闭提示" onClick={() => setToast('')}>
-            <Icon name="close" size={16} />
-          </button>
-        </div>
-      )}
-    </div>
+      </HistoryContext.Provider>
+    </ContentScope.Provider>
   )
 }
 
-createRoot(document.getElementById('root')!).render(<App />)
+document.documentElement.dataset.theme = localStorage.getItem('codex-theme') || 'dark'
+createRoot(document.getElementById('root')!).render(
+  location.pathname === '/codex/file' ? <FileView /> : <App />
+)

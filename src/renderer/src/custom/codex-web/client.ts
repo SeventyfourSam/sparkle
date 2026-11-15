@@ -24,6 +24,16 @@ export function useGateway(onMessage: (message: CodexRecord) => void): {
     let disposed = false
     let retry = 500
     let timer: ReturnType<typeof setTimeout>
+    let batchTimer: ReturnType<typeof setTimeout> | undefined
+    let events: CodexRecord[] = []
+    const flush = (): void => {
+      clearTimeout(batchTimer)
+      batchTimer = undefined
+      if (!events.length) return
+      const batch = events
+      events = []
+      handler.current({ type: 'events', events: batch })
+    }
     const pending = calls.current
     const connect = (): void => {
       const ws = new WebSocket(
@@ -37,6 +47,16 @@ export function useGateway(onMessage: (message: CodexRecord) => void): {
       ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data)
+          if (message.type === 'event' || message.type === 'detail') {
+            events.push(message)
+            if (events.length >= 128) {
+              flush()
+              return
+            }
+            if (!batchTimer) batchTimer = setTimeout(flush, 50)
+            return
+          }
+          flush()
           if (message.type === 'result') {
             const call = pending.get(message.id)
             if (call) {
@@ -52,6 +72,7 @@ export function useGateway(onMessage: (message: CodexRecord) => void): {
       }
       ws.onclose = () => {
         if (disposed) return
+        flush()
         setConnected(false)
         for (const call of pending.values()) {
           clearTimeout(call.timer)
@@ -75,6 +96,8 @@ export function useGateway(onMessage: (message: CodexRecord) => void): {
     return () => {
       disposed = true
       clearTimeout(timer)
+      clearTimeout(batchTimer)
+      events = []
       socket.current?.close()
       window.removeEventListener('online', wake)
       document.removeEventListener('visibilitychange', wake)

@@ -4,6 +4,7 @@ import {
   emptyConversation,
   mergeTurns,
   reduceEvent,
+  trimWindow,
   statusLabel
 } from '../../../renderer/src/custom/codex-web/state'
 import {
@@ -176,4 +177,45 @@ test('older pages merge overlapping turns once and preserve newly streamed items
     ['latest', 'new']
   )
   assert.equal(statusLabel({ type: 'active', activeFlags: ['waitingOnApproval'] }).text, '等待审批')
+})
+
+test('live and browsing windows never exceed twenty narratives and share unchanged item references', () => {
+  const items = Array.from({ length: 100 }, (_, index) => ({
+    id: `p${index}`,
+    type: 'agentMessage',
+    text: `progress${index}`,
+    phase: 'commentary'
+  }))
+  const anchor = {
+    id: 'question',
+    type: 'userMessage',
+    content: [{ type: 'text', text: 'question' }],
+    webPinned: true
+  }
+  const before = trimWindow({
+    ...emptyConversation(),
+    turns: [
+      { id: 'old', status: 'completed', items: [anchor, ...items] },
+      { id: 'active', status: 'inProgress', items: [] }
+    ]
+  })
+  assert.equal(before.turns[0].items.length, 20)
+  assert.equal(before.turns[0].items[0], items[80])
+  assert.equal(before.turns[1].id, 'active')
+  assert.ok(before.windowTrimmed)
+  const after = reduceEvent(before, 'item/agentMessage/delta', {
+    turnId: 'active',
+    itemId: 'new',
+    delta: 'stream'
+  })
+  assert.equal(after.turns[0].items[0], items[81])
+  assert.equal(after.turns[0].items[1], items[82])
+  assert.equal(before.turns[1].items.length, 0)
+  const browsing = trimWindow({
+    ...emptyConversation(),
+    browsingHistory: true,
+    turns: [{ id: 'history', items }]
+  })
+  assert.equal(browsing.turns[0].items.length, 20)
+  assert.equal(browsing.turns[0].items[0], items[0])
 })

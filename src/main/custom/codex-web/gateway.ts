@@ -5,6 +5,10 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { listDirectories, workingDirectory } from './directories'
 import { executeWebCommand } from './commands'
 import { readModels, modelSettingsParams } from './models'
+import { LiveItemCache, recentHistory } from './history'
+import { anchoredHistory } from './history-pages'
+import { previewItem } from '../../../shared/codex-web-history'
+import { serveProjectFile } from './files'
 import { threadSettingsPatch, type CodexWebModel } from '../../../shared/codex-web-models'
 import { parseCodexWebCommand } from '../../../shared/codex-web-commands'
 import {
@@ -29,11 +33,13 @@ interface Instance extends CodexInstance {
   threadState: Map<string, CodexRecord>
   rateLimits?: CodexRecord
   modelCatalogs: Map<string, Promise<CodexWebModel[]>>
+  liveItems: LiveItemCache
 }
 interface Browser {
   socket: WebSocket
   queue: Promise<unknown>
   watching?: { instanceId: string; threadId: string }
+  itemInterests: Set<string>
 }
 const supportedRequests = new Set([
   'item/commandExecution/requestApproval',
@@ -60,6 +66,7 @@ export class CodexGateway {
   private instances = new Map<string, Instance>()
   private browsers = new Set<Browser>()
   private sequence = 0
+  private previousSnapshot = ''
   private refreshTimer?: NodeJS.Timeout
   private refreshing = false
   private heartbeat?: NodeJS.Timeout
@@ -110,14 +117,29 @@ export class CodexGateway {
           res.writeHead(405).end()
           return
         }
-        const pathname = new URL(req.url || '/', 'http://localhost').pathname
+        const requestUrl = new URL(req.url || '/', 'http://localhost')
+        const pathname = requestUrl.pathname
+        if (pathname === '/api/file') {
+          const instance = this.instances.get(requestUrl.searchParams.get('instanceId') || '')
+          const thread = instance?.threads.find(
+            (entry) => entry.id === requestUrl.searchParams.get('threadId')
+          )
+          if (!thread?.cwd) {
+            res
+              .writeHead(404, { 'Content-Type': 'application/json' })
+              .end(JSON.stringify({ error: '会话不存在或未提供工作目录' }))
+            return
+          }
+          await serveProjectFile(req, res, thread.cwd, requestUrl.searchParams)
+          return
+        }
         if (pathname === '/api/status') {
           res.setHeader('Content-Type', 'application/json')
           res.end(JSON.stringify({ ports: this.ports(), instances: this.snapshot() }))
           return
         }
         const relative =
-          pathname === '/' || pathname === '/codex.html'
+          pathname === '/' || pathname === '/codex.html' || pathname === '/codex/file'
             ? 'codex.html'
             : decodeURIComponent(pathname).slice(1)
         const target = resolve(root, relative)
@@ -267,7 +289,11 @@ export class CodexGateway {
     for (const browser of this.browsers) this.send(browser.socket, value)
   }
   private changed(): void {
-    this.broadcast({ type: 'instances', instances: this.snapshot() })
+    const instances = this.snapshot()
+    const fingerprint = JSON.stringify(instances)
+    if (fingerprint === this.previousSnapshot) return
+    this.previousSnapshot = fingerprint
+    this.broadcast({ type: 'instances', instances })
     this.options.onChange?.()
   }
   private rejectCalls(instance: Instance): void {
@@ -313,7 +339,8 @@ export class CodexGateway {
       createdThreads: new Map(),
       createdGeneration: 0,
       threadState: new Map(),
-      modelCatalogs: new Map()
+      modelCatalogs: new Map(),
+      liveItems: new LiveItemCache()
     }
     this.instances.set(id, instance)
     this.broadcastRequests(instance)
@@ -385,8 +412,11 @@ export class CodexGateway {
       if (message.method === 'thread/goal/cleared') state.goal = null
       if (message.method === 'thread/goal/updated' || message.method === 'thread/goal/cleared')
         state.goalRevision = (state.goalRevision || 0) + 1
-      if (message.method === 'turn/plan/updated') state.plan = params.plan
-      if (message.method === 'turn/diff/updated') state.diff = params.diff
+      if (message.method === 'turn/plan/updated') state.plan = params.plan?.slice(0, 100)
+      if (message.method === 'turn/diff/updated') {
+        state.diff = String(params.diff || '').slice(0, 128000)
+        state.diffTruncated = String(params.diff || '').length > 128000
+      }
       if (
         message.method === 'thread/settings/updated' &&
         params.threadSettings &&
@@ -454,16 +484,69 @@ export class CodexGateway {
           instance.requests.delete(key)
       this.broadcastRequests(instance)
     }
+    const detail =
+      params.item || (params.itemId && typeof params.delta === 'string')
+        ? instance.liveItems.remember(message.method, params)
+        : undefined
+    const outputDelta =
+      message.method.endsWith('outputDelta') || message.method.endsWith('/outputDelta')
+    let browserParams = params
+    if (params.item) browserParams = { ...params, item: previewItem(params.item, params.turnId) }
+    if (params.turn) browserParams = { ...params, turn: { ...params.turn, items: [] } }
+    if (message.method.startsWith('item/reasoning/') && typeof params.delta === 'string')
+      browserParams = {
+        threadId: params.threadId,
+        turnId: params.turnId,
+        item: previewItem(
+          { id: params.itemId, type: 'reasoning', webHasContent: true },
+          params.turnId
+        )
+      }
+    if (message.method === 'turn/diff/updated')
+      browserParams = { threadId: params.threadId, diffAvailable: !!params.diff }
+    if (message.method === 'turn/plan/updated')
+      browserParams = { ...params, plan: params.plan?.slice(0, 100) }
+    const supportedEvent = [
+      'thread/status/changed',
+      'thread/settings/updated',
+      'thread/tokenUsage/updated',
+      'thread/goal/updated',
+      'thread/goal/cleared',
+      'turn/started',
+      'turn/completed',
+      'turn/plan/updated',
+      'turn/diff/updated',
+      'account/rateLimits/updated',
+      'error',
+      'item/started',
+      'item/completed',
+      'item/agentMessage/delta',
+      'item/reasoning/summaryTextDelta',
+      'item/reasoning/textDelta'
+    ].includes(message.method)
     for (const browser of this.browsers) {
       if (
         browser.watching?.instanceId === instance.id &&
         (!params.threadId || browser.watching.threadId === params.threadId)
       ) {
+        if (
+          detail &&
+          browser.itemInterests.has(
+            LiveItemCache.key(params.turnId, params.item?.id || params.itemId)
+          )
+        )
+          this.send(browser.socket, {
+            type: 'detail',
+            instanceId: instance.id,
+            threadId: params.threadId,
+            ...detail
+          })
+        if (outputDelta || !supportedEvent) continue
         this.send(browser.socket, {
           type: 'event',
           instanceId: instance.id,
           method: message.method,
-          params
+          params: browserParams
         })
       }
     }
@@ -572,7 +655,7 @@ export class CodexGateway {
   }
 
   private acceptBrowser(socket: WebSocket): void {
-    const browser: Browser = { socket, queue: Promise.resolve() }
+    const browser: Browser = { socket, queue: Promise.resolve(), itemInterests: new Set() }
     this.browsers.add(browser)
     socket.on('pong', () => this.dead.delete(socket))
     socket.on('error', () => {})
@@ -617,6 +700,7 @@ export class CodexGateway {
     return instance
   }
   private async unwatch(browser: Browser): Promise<void> {
+    browser.itemInterests.clear()
     const old = browser.watching
     browser.watching = undefined
     if (
@@ -681,18 +765,14 @@ export class CodexGateway {
       subscribed = true
       const history = instance.createdThreads.get(threadId)?.empty
         ? { data: [], nextCursor: null }
-        : await this.call(instance, 'thread/turns/list', {
-            threadId,
-            limit: 20,
-            sortDirection: 'desc',
-            itemsView: 'full'
-          })
+        : await recentHistory((method, params) => this.call(instance, method, params), threadId)
       const runtime = instance.threadState.get(threadId)
       const payload = {
         tokenUsage: runtime?.tokenUsage,
         goal: runtime?.goal,
         plan: runtime?.plan,
-        diff: runtime?.diff,
+        diffAvailable: !!runtime?.diff,
+        historyNotice: history.historyNotice,
         rateLimits: instance.rateLimits,
         thread: {
           ...resumed.thread,
@@ -705,8 +785,11 @@ export class CodexGateway {
           activePermissionProfile: resumed.activePermissionProfile,
           ...runtime?.settings
         },
-        turns: history.data.slice().reverse(),
-        nextCursor: history.nextCursor
+        turns: history.data,
+        nextCursor: history.nextCursor,
+        olderCursor: history.olderCursor,
+        newerCursor: history.newerCursor,
+        activeTurn: history.activeTurn
       }
       if (browser.watching?.instanceId === instanceId && browser.watching.threadId === threadId)
         this.send(browser.socket, { type: 'history', instanceId, threadId, ...payload })
@@ -724,7 +807,7 @@ export class CodexGateway {
             })
         })
         .catch(() => {})
-      return payload
+      return {}
     } catch (error) {
       if (!subscribed && instance.subscriptions.get(threadId) === subscribing)
         instance.subscriptions.delete(threadId)
@@ -798,6 +881,41 @@ export class CodexGateway {
       throw new Error('请先打开对应会话')
     const threadId = String(message.threadId)
     if (!instance.subscriptions.has(threadId)) throw new Error('请先重新同步会话')
+    if (message.action === 'item' || message.action === 'item/unwatch') {
+      if (
+        typeof message.turnId !== 'string' ||
+        typeof message.itemId !== 'string' ||
+        !message.turnId ||
+        !message.itemId ||
+        message.turnId.length > 200 ||
+        message.itemId.length > 300
+      )
+        throw new Error('条目标识无效')
+      const key = LiveItemCache.key(message.turnId, message.itemId)
+      if (message.action === 'item/unwatch') {
+        browser.itemInterests.delete(key)
+        return {}
+      }
+      if (browser.itemInterests.size >= 20 && !browser.itemInterests.has(key))
+        throw new Error('请先收起部分工具详情')
+      browser.itemInterests.add(key)
+      try {
+        return await instance.liveItems.read(
+          (method, params) => this.call(instance, method, params),
+          threadId,
+          message.turnId,
+          message.itemId
+        )
+      } catch (error) {
+        browser.itemInterests.delete(key)
+        throw error
+      }
+    }
+    if (message.action === 'diff')
+      return {
+        diff: instance.threadState.get(threadId)?.diff || '',
+        truncated: !!instance.threadState.get(threadId)?.diffTruncated
+      }
     if (message.action === 'models') return { models: await this.models(instance, threadId, true) }
     if (message.action === 'settings') {
       const params = modelSettingsParams(message, await this.models(instance, threadId))
@@ -821,13 +939,18 @@ export class CodexGateway {
       return {}
     }
     if (message.action === 'history')
-      return this.call(instance, 'thread/turns/list', {
-        threadId,
-        cursor: message.cursor,
-        limit: 20,
-        sortDirection: 'desc',
-        itemsView: 'full'
-      })
+      return message.before
+        ? anchoredHistory(
+            (method, params) => this.call(instance, method, params),
+            threadId,
+            message.before,
+            message.end || message.before
+          )
+        : recentHistory(
+            (method, params) => this.call(instance, method, params),
+            threadId,
+            message.cursor
+          )
     if (message.action === 'interrupt')
       return this.call(instance, 'turn/interrupt', { threadId, turnId: String(message.turnId) })
     if (message.action === 'send') {

@@ -18,7 +18,9 @@ export interface TranscriptGroup {
 
 function hidden(item: CodexRecord): boolean {
   if (item.type === 'reasoning')
-    return ![...(item.summary || []), ...(item.content || [])].join('\n').trim()
+    return (
+      !item.webHasContent && ![...(item.summary || []), ...(item.content || [])].join('\n').trim()
+    )
   if (item.type === 'agentMessage' || item.type === 'plan')
     return typeof item.text !== 'string' || !item.text.trim()
   return false
