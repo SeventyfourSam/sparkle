@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { createServer as createTcpServer } from 'node:net'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { WebSocket } from 'ws'
@@ -1005,11 +1005,16 @@ test('offline instances expire after leaving the conversation while an open view
   }
 })
 
-test('separate ports keep Codex local and expose the mobile site on all IPv4 interfaces', async () => {
+test('separate ports keep Codex local and expose the mobile site on all IPv4 interfaces', async (t) => {
   const f = await fixture({ separatePorts: true })
   try {
     assert.notEqual(f.port, f.webPort)
-    assert.equal((await fetch(`http://127.0.0.2:${f.webPort}/`)).status, 200)
+    // macOS does not configure every 127/8 address as a loopback alias.
+    const lanAddress = Object.values(networkInterfaces())
+      .flatMap((entries) => entries || [])
+      .find((entry) => entry.family === 'IPv4' && !entry.internal)?.address
+    if (!lanAddress) t.diagnostic('No LAN IPv4 interface is available; testing loopback only')
+    assert.equal((await fetch(`http://${lanAddress || '127.0.0.1'}:${f.webPort}/`)).status, 200)
     assert.equal((await fetch(`http://127.0.0.1:${f.port}/`)).status, 404)
     assert.equal((await f.action('watch')).error, undefined)
     for (const [port, path, options] of [
