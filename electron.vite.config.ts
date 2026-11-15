@@ -37,6 +37,7 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve('src/renderer/index.html'),
+          codex: resolve('src/renderer/codex.html'),
           floating: resolve('src/renderer/floating.html'),
           traymenu: resolve('src/renderer/traymenu.html')
         }

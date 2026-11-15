@@ -26,6 +26,7 @@ import { handleDeepLink } from './resolve/deepLink'
 import { initAppQuitLifecycle } from './resolve/appLifecycle'
 import { showNotification } from './utils/notification'
 import { appendAppLog } from './utils/log'
+import { keepCodexWebAlive } from './custom/codex-web/manager'
 
 export { setNotQuitDialog } from './resolve/appLifecycle'
 
@@ -75,9 +76,10 @@ async function scheduleLightweightMode(): Promise<void> {
   }
 
   const enterLightweightMode = async (): Promise<void> => {
-    if (autoLightweightMode === 'core') {
+    const mode = keepCodexWebAlive() ? 'tray' : autoLightweightMode
+    if (mode === 'core') {
       await quitWithoutCore()
-    } else if (autoLightweightMode === 'tray') {
+    } else if (mode === 'tray') {
       if (mainWindow && !mainWindow.isVisible()) {
         mainWindow.destroy()
         if (process.platform === 'darwin' && app.dock) {

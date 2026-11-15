@@ -44,6 +44,7 @@ import { startSSIDCheck } from '../sys/ssid'
 import { startNetworkDetection } from '../core/manager'
 import { initKeyManager } from '../service/manager'
 import { appendAppLog } from './log'
+import { initCodexWeb } from '../custom/codex-web/manager'
 
 async function initDirs(): Promise<void> {
   if (!existsSync(dataDir())) {
@@ -221,6 +222,7 @@ function startBackgroundInit(appConfig: AppConfig): void {
   runBackgroundInitTask('substore frontend', startSubStoreFrontendServer())
   runBackgroundInitTask('substore backend', startSubStoreBackendServer())
   runBackgroundInitTask('ssid check', startSSIDCheck())
+  runBackgroundInitTask('codex web', initCodexWeb())
 
   if (networkDetection) {
     runBackgroundInitTask('network detection', startNetworkDetection())

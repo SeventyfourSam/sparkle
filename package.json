@@ -18,7 +18,9 @@
     "prepare": "node scripts/prepare.ts",
     "build:dns-helper": "node scripts/build-dns-helper.ts",
     "test:dns-helper": "tsx --test src/main/sys/dns-helper.test.ts",
-    "test:custom": "tsx --test scripts/custom/release.test.ts scripts/custom/release-queue.test.ts scripts/custom/prepare.test.ts src/shared/mihomo-release.test.ts src/main/core/custom-config.test.ts src/main/custom/updates.test.ts src/main/custom/config-application.test.ts src/main/custom/config-reload.integration.test.ts src/main/core/local-core-startup.test.ts src/main/core/local-core.test.ts src/main/sys/dns-helper.test.ts",
+    "test:custom": "tsx --test scripts/custom/release.test.ts scripts/custom/release-queue.test.ts scripts/custom/prepare.test.ts src/shared/mihomo-release.test.ts src/main/core/custom-config.test.ts src/main/custom/updates.test.ts src/main/custom/config-application.test.ts src/main/custom/config-reload.integration.test.ts src/main/core/local-core-startup.test.ts src/main/core/local-core.test.ts src/main/sys/dns-helper.test.ts src/main/custom/codex-web/*.test.ts",
+    "test:codex-web": "tsx --test src/main/custom/codex-web/*.test.ts",
+    "serve:codex-web": "tsx scripts/custom/codex-web-standalone.mts",
     "updater": "node scripts/updater.ts",
     "checksum": "node scripts/checksum.ts",
     "telegram": "node scripts/telegram.ts",
@@ -38,6 +40,7 @@
     "dayjs": "^1.11.23",
     "express": "^5.3.0",
     "iconv-lite": "^0.7.3",
+    "remark-gfm": "4.0.1",
     "webdav": "^5.11.0",
     "ws": "^8.22.0",
     "yaml": "^2.9.1"
