@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { homedir } from 'node:os'
 import { CodexGateway } from '../../src/main/custom/codex-web/gateway'
 import { defaultCodexWebOptions, validateOptions } from '../../src/main/custom/codex-web/config'
 
@@ -29,6 +30,11 @@ async function main(): Promise<void> {
     ...options,
     frontendDir,
     version: process.env.npm_package_version || 'standalone',
+    claude: {
+      directory: resolve(homedir(), '.local/share/sparkle-claude-channel'),
+      bridgeFile: resolve(import.meta.dirname, '../../out/main/claude-channel.js'),
+      defaultCommand: true
+    },
     log: (message) => console.error(`[Codex Web] ${message}`)
   })
   await gateway.start()

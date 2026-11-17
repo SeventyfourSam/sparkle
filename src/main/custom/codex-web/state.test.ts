@@ -13,6 +13,7 @@ import {
 } from '../../../renderer/src/custom/codex-web/tool-groups'
 import { parseCodexWebCommand } from '../../../shared/codex-web-commands'
 import { contextUsage } from '../../../renderer/src/custom/codex-web/status-line'
+import { visibleNarrative } from '../../../shared/codex-web-history'
 
 test('tool groups keep messages separate and remain stable while streaming more calls', () => {
   const initial = [
@@ -88,6 +89,37 @@ test('turn errors and interruptions remain visible and separate from collapsed o
   assert.equal(groups.length, 4)
   assert.equal(groups[1].error, 'visible failure')
   assert.equal(groups[3].interrupted, true)
+})
+
+test('compaction stays inside collapsed activities and does not displace twenty live or older messages', () => {
+  const items = Array.from({ length: 35 }, (_, i) => [
+    { id: `message:${i}`, type: 'agentMessage', text: `Progress ${i}` },
+    { id: `command:${i}`, type: 'commandExecution' },
+    { id: `compact:${i}`, type: 'contextCompaction' },
+    { id: `file:${i}`, type: 'fileChange' }
+  ]).flat()
+  for (const browsingHistory of [false, true]) {
+    const state = trimWindow({
+      ...emptyConversation(),
+      browsingHistory,
+      turns: [{ id: 'turn', items }]
+    })
+    const kept = state.turns[0].items
+    const messages = kept.filter(visibleNarrative)
+    assert.equal(messages.length, 20)
+    assert.equal(messages[0].id, browsingHistory ? 'message:0' : 'message:15')
+    const groups = groupConversationItems(state.turns)
+    const activities = groups.filter((group) => group.tools)
+    assert(
+      activities.some((group) => group.items.some((item) => item.type === 'contextCompaction'))
+    )
+    assert(
+      groups.filter((group) => !group.tools).every((group) => group.items.every(visibleNarrative))
+    )
+    assert(
+      activities.every((group) => group.items.some((item) => item.type === 'commandExecution'))
+    )
+  }
 })
 
 test('slash parsing preserves paths and literal slash text, and rejects invalid goal budgets', () => {

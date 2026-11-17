@@ -1,12 +1,5 @@
 import type { CodexRecord } from '../../../../shared/codex-web'
-
-const narrativeTypes = new Set([
-  'userMessage',
-  'agentMessage',
-  'reasoning',
-  'plan',
-  'contextCompaction'
-])
+import { isToolItem } from '../../../../shared/codex-web-history'
 
 export interface TranscriptGroup {
   id: string
@@ -30,7 +23,7 @@ export function groupToolItems(items: CodexRecord[]): TranscriptGroup[] {
   const groups: TranscriptGroup[] = []
   for (const item of items) {
     if (hidden(item)) continue
-    const tools = !narrativeTypes.has(item.type)
+    const tools = isToolItem(item)
     const previous = groups.at(-1)
     if (tools && previous?.tools) previous.items.push(item)
     else groups.push({ id: item.id, tools, items: [item] })

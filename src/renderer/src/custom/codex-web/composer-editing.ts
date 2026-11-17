@@ -12,7 +12,10 @@ export function useComposerEditing(): {
   useEffect(() => {
     const inside = (target: EventTarget | null): boolean =>
       target instanceof Node && !!ref.current?.contains(target)
-    const pointer = (event: PointerEvent): void => setEditing(inside(event.target))
+    const pointer = (event: PointerEvent): void => {
+      if (event.target instanceof Element && event.target.closest('[data-keep-composer]')) return
+      setEditing(inside(event.target))
+    }
     const focus = (event: FocusEvent): void => {
       if (event.target !== document.body && event.target !== document.documentElement)
         setEditing(inside(event.target))

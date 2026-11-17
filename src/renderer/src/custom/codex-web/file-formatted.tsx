@@ -144,7 +144,9 @@ export default function FormattedFile({
   line,
   column,
   instanceId,
-  threadId
+  threadId,
+  sessionId,
+  nativeId
 }: {
   name: string
   path: string
@@ -153,13 +155,15 @@ export default function FormattedFile({
   column: number
   instanceId: string
   threadId: string
+  sessionId?: string
+  nativeId?: string
 }): React.JSX.Element {
   const format = fileFormat(name)
   const [source, setSource] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const scope = useMemo(
-    () => ({ instanceId, threadId, cwd: path.replace(/[\\/][^\\/]+$/, '') }),
-    [instanceId, threadId, path]
+    () => ({ instanceId, threadId, sessionId, nativeId, cwd: path.replace(/[\\/][^\\/]+$/, '') }),
+    [instanceId, threadId, sessionId, nativeId, path]
   )
   useEffect(() => {
     if (format.kind !== 'markdown' || source) return

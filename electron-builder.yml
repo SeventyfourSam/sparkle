@@ -1,5 +1,7 @@
 appId: sparkle.app
 productName: Sparkle
+asarUnpack:
+  - '**/node_modules/node-pty/**'
 directories:
   buildResources: build
 files:

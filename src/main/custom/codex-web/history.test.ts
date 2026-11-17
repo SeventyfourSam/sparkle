@@ -157,6 +157,25 @@ test('bidirectional cursors return adjacent messages without gaps or duplicate b
   assert.deepEqual([...ids(forward), ...ids(latest), ...ids(end)], [...ids(second), ...ids(first)])
 })
 
+test('compaction events do not consume the ten-message history quota or break bidirectional paging', async () => {
+  const f = historyFixture(
+    Array.from({ length: 35 }, (_, i) => [
+      { id: `message:${i}`, type: 'agentMessage', text: `Progress ${i}` },
+      { id: `compact:${i}`, type: 'contextCompaction' }
+    ]).flat()
+  )
+  const latest = await recentHistory(f.call, 'thread')
+  const items = (page: CodexRecord): CodexRecord[] =>
+    page.data.flatMap((turn: CodexRecord) => turn.items)
+  assert.equal(items(latest).filter(visibleNarrative).length, 10)
+  assert(items(latest).some((item) => item.type === 'contextCompaction'))
+  assert(!visibleNarrative({ type: 'contextCompaction', text: 'Summary is not a reply' }))
+  const previous = await recentHistory(f.call, 'thread', latest.olderCursor)
+  assert.equal(items(previous).filter(visibleNarrative).length, 10)
+  const forward = await recentHistory(f.call, 'thread', previous.newerCursor)
+  assert.deepEqual(items(forward), items(latest))
+})
+
 test('tool-only bursts are bounded and running state is separate from visible messages', async () => {
   const f = historyFixture(
     Array.from({ length: 300 }, (_, i) => ({

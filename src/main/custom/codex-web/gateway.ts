@@ -12,6 +12,7 @@ import { serveProjectFile } from './files'
 import { readSessions, sessionId } from './sessions'
 import { AsyncQuestionState } from './questions'
 import { CodexLauncher, type CodexCommand } from './launcher'
+import { ClaudeChannelGateway } from '../claude-channel/gateway'
 import { threadSettingsPatch, type CodexWebModel } from '../../../shared/codex-web-models'
 import { parseCodexWebCommand } from '../../../shared/codex-web-commands'
 import {
@@ -76,6 +77,7 @@ export class CodexGateway {
   private refreshing = false
   private heartbeat?: NodeJS.Timeout
   private launcher: CodexLauncher
+  private claude?: ClaudeChannelGateway
 
   constructor(
     private readonly options: {
@@ -89,8 +91,10 @@ export class CodexGateway {
       log?: (text: string) => void
       codexCommand?: () => Promise<CodexCommand>
       codexStartupTimeoutMs?: number
+      claude?: ConstructorParameters<typeof ClaudeChannelGateway>[0]
     }
   ) {
+    if (options.claude) this.claude = new ClaudeChannelGateway(options.claude)
     this.launcher = new CodexLauncher({
       instances: () => this.snapshot(),
       command: options.codexCommand,
@@ -128,12 +132,17 @@ export class CodexGateway {
       res.setHeader('Referrer-Policy', 'no-referrer')
       res.setHeader('Cache-Control', 'no-store')
       try {
+        if (this.claude && (await this.claude.http(req, res))) return
         if (req.method !== 'GET' && req.method !== 'HEAD') {
           res.writeHead(405).end()
           return
         }
         const requestUrl = new URL(req.url || '/', 'http://localhost')
         const pathname = requestUrl.pathname
+        if (pathname === '/claude') {
+          res.writeHead(302, { Location: '/' }).end()
+          return
+        }
         if (pathname === '/api/file') {
           const instance = this.instances.get(requestUrl.searchParams.get('instanceId') || '')
           const thread = instance?.threads.find(
@@ -187,6 +196,7 @@ export class CodexGateway {
           socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
           return
         }
+        if (this.claude?.upgrade(req, socket, head, role)) return
         const local = loopback(req.socket.remoteAddress)
         const backend =
           role !== 'web' && pathname === CODEX_SERVER_PATH && local && !req.headers.origin
@@ -224,8 +234,17 @@ export class CodexGateway {
     try {
       attachUpgrade(server, separate ? 'web' : 'shared')
       if (separate) {
-        const backend = createServer((_req, res) => {
-          res.writeHead(404).end()
+        const backend = createServer(async (req, res) => {
+          try {
+            if (
+              new URL(req.url || '/', 'http://localhost').pathname === '/claude/hook' &&
+              (await this.claude?.http(req, res))
+            )
+              return
+            res.writeHead(404).end()
+          } catch {
+            res.writeHead(400).end()
+          }
         })
         this.backendServer = backend
         attachUpgrade(backend, 'backend')
@@ -240,6 +259,9 @@ export class CodexGateway {
       await this.stop()
       throw error
     }
+    await this.claude
+      ?.start(this.ports().port)
+      .catch((error) => this.options.log?.(`Claude Channel 初始化失败：${String(error)}`))
     this.refreshTimer = setInterval(() => void this.refreshAll(), 5000)
     this.heartbeat = setInterval(() => {
       for (const ws of this.wss.clients) {
@@ -271,6 +293,7 @@ export class CodexGateway {
     clearInterval(this.refreshTimer)
     clearInterval(this.heartbeat)
     await this.launcher.stop()
+    await this.claude?.stop()
     for (const ws of this.wss.clients) ws.terminate()
     for (const instance of this.instances.values()) this.rejectCalls(instance)
     this.instances.clear()

@@ -1,5 +1,16 @@
 import { createRoot } from 'react-dom/client'
-import { memo, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import {
+  lazy,
+  Suspense,
+  memo,
+  useEffect,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode
+} from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -46,6 +57,17 @@ import {
   publishDetail
 } from './lazy-details'
 import './style.css'
+import { CopyMessage } from '../copy-message'
+import { useClaudeChannel } from '../claude-channel/channel'
+import {
+  ClaudeConnectionHelp,
+  ClaudeNewSession,
+  ClaudeSessionCard,
+  SessionProviderChoice,
+  type SessionProvider
+} from '../claude-channel/session-ui'
+
+const ClaudeConversation = lazy(() => import('../claude-channel/conversation'))
 
 type Selection = { instanceId: string; threadId: string }
 const time = (seconds?: number): string =>
@@ -145,6 +167,7 @@ function Badge({ status }: { status?: CodexRecord }): React.JSX.Element {
 }
 
 const Item = memo(function Item({ item }: { item: CodexRecord }): React.JSX.Element | null {
+  const { target, command } = useContext(HistoryContext)
   if (item.type === 'userMessage') {
     return (
       <div className="message user">
@@ -185,6 +208,29 @@ const Item = memo(function Item({ item }: { item: CodexRecord }): React.JSX.Elem
         <div className="message-label">
           <Icon name="spark" size={14} />
           Codex{item.phase === 'commentary' && <span>进展</span>}
+          <CopyMessage
+            text={item.text || ''}
+            load={
+              item.webDeferred && target && item.webTurnId
+                ? async () => {
+                    try {
+                      const result = await command('item', {
+                        ...target,
+                        turnId: item.webTurnId,
+                        itemId: item.id
+                      })
+                      return result.item?.text || item.text || ''
+                    } finally {
+                      void command('item/unwatch', {
+                        ...target,
+                        turnId: item.webTurnId,
+                        itemId: item.id
+                      }).catch(() => {})
+                    }
+                  }
+                : undefined
+            }
+          />
         </div>
         {asyncQuestions(item) ? <AsyncQuestions item={item} /> : <Mark>{item.text || ''}</Mark>}
         {item.webDeferred && (
@@ -486,6 +532,9 @@ function App(): React.JSX.Element {
   const [instances, setInstances] = useState<CodexInstance[]>([])
   const [requests, setRequests] = useState<Record<string, CodexPendingRequest[]>>({})
   const [selection, setSelection] = useState<Selection>()
+  const claude = useClaudeChannel()
+  const [claudeSelection, setClaudeSelection] = useState<{ id: string; terminal?: boolean }>()
+  const [newProvider, setNewProvider] = useState<SessionProvider>('codex')
   const selectionRef = useRef(selection)
   selectionRef.current = selection
   const [conversation, setConversation] = useState(emptyConversation)
@@ -516,6 +565,7 @@ function App(): React.JSX.Element {
   const scroller = useRef<HTMLDivElement>(null)
   const serversDialog = useRef<HTMLDialogElement>(null)
   const createDialog = useRef<HTMLDialogElement>(null)
+  const createBackdrop = useRef(false)
   const bottom = useRef<HTMLDivElement>(null)
   const nearBottom = useRef(true)
   const hydrating = useRef(true)
@@ -692,13 +742,33 @@ function App(): React.JSX.Element {
   const allThreads = instances.flatMap((item) =>
     item.threads.map((entry) => ({ thread: entry, instance: item }))
   )
-  const visible = allThreads.sort((a, b) => (b.thread.updatedAt || 0) - (a.thread.updatedAt || 0))
+  const visible = [
+    ...allThreads.map((item) => ({
+      ...item,
+      provider: 'codex' as const,
+      updatedAt: (item.thread.updatedAt || 0) * 1000
+    })),
+    ...claude.sessions.map((session) => ({
+      provider: 'claude' as const,
+      session,
+      updatedAt: session.createdAt
+    }))
+  ].sort((a, b) => b.updatedAt - a.updatedAt)
 
   const select = (next: Selection, preserveDraft = true): void => {
+    setClaudeSelection(undefined)
     if (selection && preserveDraft)
       drafts.current.set(`${selection.instanceId}:${selection.threadId}`, draft)
     setDraft(drafts.current.get(`${next.instanceId}:${next.threadId}`) || '')
     setSelection(next)
+  }
+  const selectClaude = (id: string, terminal = false): void => {
+    if (selection) {
+      drafts.current.set(`${selection.instanceId}:${selection.threadId}`, draft)
+      setSelection(undefined)
+      void command('unwatch').catch(() => {})
+    }
+    setClaudeSelection({ id, terminal })
   }
   const openCreate = (): void => {
     const available = instances.filter((item) => item.ready)
@@ -717,6 +787,7 @@ function App(): React.JSX.Element {
     setHistoryLoading(false)
     setCreateError('')
     setChoosingDirectory(false)
+    if (newProvider === 'claude') return
     setStartingCodex(true)
     try {
       const result = await command('ensure', {
@@ -744,6 +815,20 @@ function App(): React.JSX.Element {
       createDialog.current?.close()
     } catch (error) {
       setCreateError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCreating(false)
+    }
+  }
+  const createClaude = async (resume: string): Promise<void> => {
+    if (!claude.connected || !newCwd || creating) return
+    setCreating(true)
+    setCreateError('')
+    try {
+      const result = await claude.command('create', { cwd: newCwd, ...(resume ? { resume } : {}) })
+      selectClaude(result.sessionId, true)
+      createDialog.current?.close()
+    } catch (error) {
+      setCreateError((error as Error).message)
     } finally {
       setCreating(false)
     }
@@ -875,10 +960,14 @@ function App(): React.JSX.Element {
   return (
     <ContentScope.Provider value={linkScope}>
       <HistoryContext.Provider value={historyContext}>
-        <div className={`app ${selection ? 'has-selection' : ''}`}>
+        <div className={`app ${selection || claudeSelection ? 'has-selection' : ''}`}>
           <aside className="sidebar">
             <header className="sidebar-create">
-              <button className="new-session-button" disabled={!connected} onClick={openCreate}>
+              <button
+                className="new-session-button"
+                disabled={!connected && !claude.connected}
+                onClick={openCreate}
+              >
                 <Icon name="plus" size={17} />
                 新建会话
               </button>
@@ -887,36 +976,46 @@ function App(): React.JSX.Element {
               {!visible.length && (
                 <div className="empty-list">
                   <Icon name="terminal" size={32} />
-                  <h3>等待 Codex 接入</h3>
-                  <p>
-                    在 Codex 中手动配置本机接入端口后，重启对应的
-                    Codex。连接成功的会话会自动显示在这里。
-                  </p>
+                  <h3>还没有会话</h3>
+                  <p>点击新建，选择 Codex 或 Claude。已经接入的会话也会显示在这里。</p>
                 </div>
               )}
-              {visible.map(({ thread, instance }) => (
-                <button
-                  className={`thread-card ${selection?.instanceId === instance.id && selection.threadId === thread.id ? 'selected' : ''}`}
-                  key={`${instance.id}:${thread.id}`}
-                  onClick={() => select({ instanceId: instance.id, threadId: thread.id })}
-                >
-                  <div className="thread-card-top">
-                    <span className="project">
-                      <Icon name="folder" size={13} />
-                      {folder(thread.cwd)}
-                    </span>
-                    <time>{time(thread.updatedAt)}</time>
-                  </div>
-                  <h2>{thread.name || thread.preview || '未命名会话'}</h2>
-                  <p>{thread.preview || thread.cwd}</p>
-                  <div className="thread-card-bottom">
-                    <Badge status={instance.ready ? thread.status : { type: 'offline' }} />
-                    <span>
-                      {runtimeName(instance.runtime)} · {instance.pid}
-                    </span>
-                  </div>
-                </button>
-              ))}
+              {visible.map((item) => {
+                if (item.provider === 'claude')
+                  return (
+                    <ClaudeSessionCard
+                      key={`claude:${item.session.id}`}
+                      session={item.session}
+                      selected={claudeSelection?.id === item.session.id}
+                      onSelect={() => selectClaude(item.session.id)}
+                    />
+                  )
+                const { thread, instance } = item
+                return (
+                  <button
+                    className={`thread-card ${selection?.instanceId === instance.id && selection.threadId === thread.id ? 'selected' : ''}`}
+                    key={`${instance.id}:${thread.id}`}
+                    data-provider="codex"
+                    onClick={() => select({ instanceId: instance.id, threadId: thread.id })}
+                  >
+                    <div className="thread-card-top">
+                      <span className="project">
+                        <Icon name="folder" size={13} />
+                        {folder(thread.cwd)}
+                      </span>
+                      <time>{time(thread.updatedAt)}</time>
+                    </div>
+                    <h2>{thread.name || thread.preview || '未命名会话'}</h2>
+                    <p>{thread.preview || thread.cwd}</p>
+                    <div className="thread-card-bottom">
+                      <Badge status={instance.ready ? thread.status : { type: 'offline' }} />
+                      <span>
+                        Codex · {runtimeName(instance.runtime)} · {instance.pid}
+                      </span>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
             <footer className="sidebar-footer">
               <button
@@ -937,12 +1036,22 @@ function App(): React.JSX.Element {
             </footer>
           </aside>
           <main className="conversation">
-            {!selection ? (
+            {claudeSelection ? (
+              <Suspense fallback={<p className="claude-empty">加载会话…</p>}>
+                <ClaudeConversation
+                  key={claudeSelection.id}
+                  channel={claude}
+                  sessionId={claudeSelection.id}
+                  initialTerminal={claudeSelection.terminal}
+                  onBack={() => setClaudeSelection(undefined)}
+                />
+              </Suspense>
+            ) : !selection ? (
               <div className="welcome">
                 <div className="welcome-symbol">
                   <Icon name="spark" size={38} />
                 </div>
-                <span className="eyebrow">CODEX, WITHIN REACH</span>
+                <span className="eyebrow">WITHIN REACH</span>
                 <h2>随时接着做。</h2>
                 <p>
                   查看进展，给出下一步指令。
@@ -951,7 +1060,7 @@ function App(): React.JSX.Element {
                 </p>
                 <div className="welcome-hint">
                   <span className="live-dot" />
-                  与终端里的 Codex 实时同步
+                  与电脑上的会话实时同步
                 </div>
               </div>
             ) : (
@@ -1339,29 +1448,58 @@ function App(): React.JSX.Element {
           <dialog
             ref={createDialog}
             aria-label="新建会话"
-            className="create-dialog"
+            className="create-dialog unified-create-dialog"
             onClose={() => setCreateOpen(false)}
             onCancel={(event) => {
               if (createBusy) event.preventDefault()
             }}
+            onPointerDown={(event) => {
+              createBackdrop.current = event.target === event.currentTarget
+            }}
             onClick={(event) => {
-              if (!createBusy && event.target === event.currentTarget) createDialog.current?.close()
+              if (!createBusy && createBackdrop.current && event.target === event.currentTarget)
+                createDialog.current?.close()
             }}
           >
+            {createOpen && (
+              <SessionProviderChoice
+                value={newProvider}
+                disabled={createBusy}
+                onChange={(provider) => {
+                  setNewProvider(provider)
+                  setNewCwd('')
+                  setCreateError('')
+                  setChoosingDirectory(true)
+                  setHistoryLoading(false)
+                }}
+              />
+            )}
             {choosingDirectory && createOpen ? (
               <DirectoryPicker
-                command={command}
+                key={newProvider}
+                command={newProvider === 'claude' ? claude.command : command}
                 initialPath={newCwd}
                 recent={[
-                  ...new Set(
-                    instances.flatMap((item) =>
+                  ...new Set([
+                    ...claude.sessions.map((item) => item.cwd),
+                    ...instances.flatMap((item) =>
                       item.threads
                         .map((thread) => thread.cwd)
                         .filter((path): path is string => typeof path === 'string' && !!path)
                     )
-                  )
+                  ])
                 ]}
                 onSelect={(path) => void prepareCreate(path)}
+                onCancel={() => createDialog.current?.close()}
+              />
+            ) : !choosingDirectory && createOpen && newProvider === 'claude' ? (
+              <ClaudeNewSession
+                cwd={newCwd}
+                busy={createBusy}
+                connected={claude.connected}
+                error={createError}
+                onSubmit={(resume) => void createClaude(resume)}
+                onDirectory={() => setChoosingDirectory(true)}
                 onCancel={() => createDialog.current?.close()}
               />
             ) : !choosingDirectory && createOpen ? (
@@ -1470,6 +1608,7 @@ function App(): React.JSX.Element {
                 </div>
               </form>
             ) : null}
+            {createOpen && newProvider === 'claude' && <ClaudeConnectionHelp />}
           </dialog>
           <dialog
             ref={serversDialog}

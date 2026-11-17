@@ -21,6 +21,12 @@ export default defineConfig({
   main: {
     define: buildDefines,
     build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/main/index.ts'),
+          'claude-channel': resolve('src/main/custom/claude-channel/entry.ts')
+        }
+      },
       externalizeDeps: {
         exclude: ['age-encryption']
       }

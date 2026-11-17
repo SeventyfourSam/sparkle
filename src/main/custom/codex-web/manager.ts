@@ -28,6 +28,14 @@ function createGateway(value: CodexWebOptions): CodexGateway {
     webPort: value.webPort,
     frontendDir: join(__dirname, '../renderer'),
     version: app.getVersion(),
+    claude: {
+      directory: join(dataDir(), 'custom-claude-channel'),
+      bridgeFile: join(__dirname, 'claude-channel.js'),
+      defaultCommand: true,
+      log: (message) => {
+        void appendAppLog(`[Claude Channel]: ${message}\n`).catch(() => {})
+      }
+    },
     log: (message) => {
       void appendAppLog(`[Codex Web]: ${message}\n`).catch(() => {})
     }

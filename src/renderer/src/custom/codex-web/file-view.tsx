@@ -21,14 +21,19 @@ export function FileView(): React.JSX.Element {
         const result = await response.json()
         if (!response.ok) throw new Error(result.error || '无法打开文件')
         setFile(result)
-        document.title = `${result.name} · Codex`
+        document.title = `${result.name} · Sparkle`
       })
       .catch((error) => {
         if (error.name !== 'AbortError') setError(error.message)
       })
     return () => abort.abort()
   }, [])
-  const scope = { instanceId: query.get('instanceId') || '', threadId: query.get('threadId') || '' }
+  const scope = {
+    instanceId: query.get('instanceId') || '',
+    threadId: query.get('threadId') || '',
+    sessionId: query.get('provider') === 'claude' ? query.get('sessionId') || undefined : undefined,
+    nativeId: query.get('nativeId') || undefined
+  }
   return (
     <main className="file-view">
       <header className="file-view-header">
@@ -67,6 +72,8 @@ export function FileView(): React.JSX.Element {
                 column={column}
                 instanceId={scope.instanceId}
                 threadId={scope.threadId}
+                sessionId={scope.sessionId}
+                nativeId={scope.nativeId}
               />
             </Suspense>
           )}

@@ -46,10 +46,10 @@ export default function CodexWebSettings(): React.JSX.Element {
     }
   }
   return (
-    <SettingCard header="Codex Web">
+    <SettingCard header="Codex / Claude Web">
       {(
         [
-          ['port', 'Codex 接入端口'],
+          ['port', '本机接入端口'],
           ['webPort', '网页访问端口']
         ] as const
       ).map(([key, title], index) => (

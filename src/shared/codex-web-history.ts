@@ -4,7 +4,7 @@ import { asyncQuestions, formatQuestionReplies, itemQuestionReplies } from './co
 export const HISTORY_WINDOW = 10
 export const HISTORY_TEXT_LIMIT = 12000
 export const TOOL_OUTPUT_LIMIT = 64000
-const narrative = new Set(['userMessage', 'agentMessage', 'reasoning', 'plan', 'contextCompaction'])
+const narrative = new Set(['userMessage', 'agentMessage', 'reasoning', 'plan'])
 export const isToolItem = (item: CodexRecord): boolean => !narrative.has(item.type)
 export function visibleNarrative(item: CodexRecord): boolean {
   if (isToolItem(item)) return false
@@ -13,7 +13,6 @@ export function visibleNarrative(item: CodexRecord): boolean {
       !!item.webHasContent || !![...(item.summary || []), ...(item.content || [])].join('').trim()
     )
   if (item.type === 'userMessage') return !!item.content?.length
-  if (item.type === 'contextCompaction') return true
   if (asyncQuestions(item)) return true
   return typeof item.text === 'string' && !!item.text.trim()
 }

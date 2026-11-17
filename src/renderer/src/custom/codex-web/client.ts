@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CODEX_BROWSER_PATH, type CodexRecord } from '../../../../shared/codex-web'
 
-export function useGateway(onMessage: (message: CodexRecord) => void): {
+export function useGateway(
+  onMessage: (message: CodexRecord) => void,
+  path = CODEX_BROWSER_PATH,
+  enabled = true
+): {
   connected: boolean
   command: (action: string, params?: CodexRecord) => Promise<CodexRecord>
 } {
@@ -21,6 +25,10 @@ export function useGateway(onMessage: (message: CodexRecord) => void): {
     >()
   )
   useEffect(() => {
+    if (!enabled) {
+      setConnected(false)
+      return
+    }
     let disposed = false
     let retry = 500
     let timer: ReturnType<typeof setTimeout>
@@ -37,7 +45,7 @@ export function useGateway(onMessage: (message: CodexRecord) => void): {
     const pending = calls.current
     const connect = (): void => {
       const ws = new WebSocket(
-        `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${CODEX_BROWSER_PATH}`
+        `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`
       )
       socket.current = ws
       ws.onopen = () => {
@@ -107,7 +115,7 @@ export function useGateway(onMessage: (message: CodexRecord) => void): {
       }
       pending.clear()
     }
-  }, [])
+  }, [path, enabled])
   const command = useCallback((action: string, params: CodexRecord = {}): Promise<CodexRecord> => {
     if (socket.current?.readyState !== WebSocket.OPEN)
       return Promise.reject(new Error('正在重新连接，请稍候'))

@@ -4,8 +4,10 @@ export interface FileLocation {
   column?: number
 }
 export interface LinkScope {
-  instanceId: string
-  threadId: string
+  instanceId?: string
+  threadId?: string
+  sessionId?: string
+  nativeId?: string
   cwd?: string
 }
 
@@ -47,11 +49,15 @@ export function contentHref(value: string, scope?: LinkScope): string | undefine
   }
   const location = fileLocation(decoded)
   if (!location || !scope) return
-  const query = new URLSearchParams({
-    instanceId: scope.instanceId,
-    threadId: scope.threadId,
-    path: location.path
-  })
+  if (!scope.sessionId && (!scope.instanceId || !scope.threadId)) return
+  const query = scope.sessionId
+    ? new URLSearchParams({ provider: 'claude', sessionId: scope.sessionId, path: location.path })
+    : new URLSearchParams({
+        instanceId: scope.instanceId!,
+        threadId: scope.threadId!,
+        path: location.path
+      })
+  if (scope.nativeId) query.set('nativeId', scope.nativeId)
   if (scope.cwd) query.set('base', scope.cwd)
   if (location.line) query.set('line', String(location.line))
   if (location.column) query.set('column', String(location.column))
