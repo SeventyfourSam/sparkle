@@ -96,9 +96,12 @@ export async function publishDefaultCommand(
   }
   if (settings.version !== 1 || !isAbsolute(settings.executable))
     throw new Error('Claude 默认命令设置无效')
+  // Shells cannot stat Electron's virtual archive paths; the runtime can read them.
+  const bridgeContainer = descriptor.bridge.replace(/([\\/]app\.asar)[\\/].*$/, '$1')
   await writeJsonAtomically(join(directory, 'active.json'), {
     runtime: descriptor.runtime,
     bridge: descriptor.bridge,
+    bridgeContainer,
     descriptorFile: file,
     executable: settings.executable
   })
@@ -108,14 +111,14 @@ export async function publishDefaultCommand(
   const sh = (path: string): string => `'${path.replace(/'/g, `'\\''`)}'`
   const script =
     process.platform === 'win32'
-      ? `@echo off\r\nsetlocal DisableDelayedExpansion\r\nif not exist "${cmd(descriptor.runtime)}" goto native\r\nif not exist "${cmd(descriptor.bridge)}" goto native\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n"${cmd(descriptor.runtime)}" "${cmd(descriptor.bridge)}" --launch-default --descriptor "${cmd(file)}" -- %*\r\nexit /b %errorlevel%\r\n:native\r\n"${cmd(settings.executable)}" %*\r\nexit /b %errorlevel%\r\n`
-      : `#!/bin/sh\nif [ -f ${sh(descriptor.runtime)} ] && [ -f ${sh(descriptor.bridge)} ]; then\n  ELECTRON_RUN_AS_NODE=1 exec ${sh(descriptor.runtime)} ${sh(descriptor.bridge)} --launch-default --descriptor ${sh(file)} -- "$@"\nfi\nexec ${sh(settings.executable)} "$@"\n`
+      ? `@echo off\r\nsetlocal DisableDelayedExpansion\r\nif not exist "${cmd(descriptor.runtime)}" goto native\r\nif not exist "${cmd(bridgeContainer)}" goto native\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n"${cmd(descriptor.runtime)}" "${cmd(descriptor.bridge)}" --launch-default --descriptor "${cmd(file)}" -- %*\r\nexit /b %errorlevel%\r\n:native\r\n"${cmd(settings.executable)}" %*\r\nexit /b %errorlevel%\r\n`
+      : `#!/bin/sh\nif [ -f ${sh(descriptor.runtime)} ] && [ -f ${sh(bridgeContainer)} ]; then\n  ELECTRON_RUN_AS_NODE=1 exec ${sh(descriptor.runtime)} ${sh(descriptor.bridge)} --launch-default --descriptor ${sh(file)} -- "$@"\nfi\nexec ${sh(settings.executable)} "$@"\n`
   const launcher = join(bin, process.platform === 'win32' ? 'claude.cmd' : 'claude')
   await writeFile(launcher, script, { mode: 0o700 })
   await chmod(launcher, 0o700)
   if (process.platform === 'win32') {
     const quote = (text: string): string => `'${text.replace(/'/g, "''")}'`
-    const bootstrap = `function global:claude {\n  $sparkleArguments = $args\n  $sparkleLaunch = $null\n  try { $sparkleLaunch = Get-Content -LiteralPath ${quote(join(directory, 'active.json'))} -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}\n  if ($sparkleLaunch -and (Test-Path -LiteralPath $sparkleLaunch.runtime) -and (Test-Path -LiteralPath $sparkleLaunch.bridge)) {\n    $sparkleNodeMode = [Environment]::GetEnvironmentVariable('ELECTRON_RUN_AS_NODE', 'Process')\n    try {\n      $env:ELECTRON_RUN_AS_NODE = '1'\n      & $sparkleLaunch.runtime $sparkleLaunch.bridge --launch-default --descriptor $sparkleLaunch.descriptorFile -- @sparkleArguments\n    } finally { [Environment]::SetEnvironmentVariable('ELECTRON_RUN_AS_NODE', $sparkleNodeMode, 'Process') }\n    return\n  }\n  & ${quote(settings.executable)} @sparkleArguments\n}\n`
+    const bootstrap = `function global:claude {\n  $sparkleArguments = $args\n  $sparkleLaunch = $null\n  try { $sparkleLaunch = Get-Content -LiteralPath ${quote(join(directory, 'active.json'))} -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}\n  if ($sparkleLaunch -and (Test-Path -LiteralPath $sparkleLaunch.runtime) -and (Test-Path -LiteralPath $sparkleLaunch.bridgeContainer)) {\n    $sparkleNodeMode = [Environment]::GetEnvironmentVariable('ELECTRON_RUN_AS_NODE', 'Process')\n    try {\n      $env:ELECTRON_RUN_AS_NODE = '1'\n      & $sparkleLaunch.runtime $sparkleLaunch.bridge --launch-default --descriptor $sparkleLaunch.descriptorFile -- @sparkleArguments\n    } finally { [Environment]::SetEnvironmentVariable('ELECTRON_RUN_AS_NODE', $sparkleNodeMode, 'Process') }\n    return\n  }\n  & ${quote(settings.executable)} @sparkleArguments\n}\n`
     await writeFile(join(directory, 'command.ps1'), '\uFEFF' + bootstrap, { mode: 0o600 })
   }
   return true
