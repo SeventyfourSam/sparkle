@@ -749,7 +749,10 @@ test(
           }
           const [code] = await exited
           assert.equal(code, 0, JSON.stringify({ natural, stderr, frames }))
-          assert(frames.some((frame) => frame.type === 'ready'))
+          assert(
+            frames.some((frame) => frame.type === 'ready'),
+            JSON.stringify({ stderr, frames })
+          )
           if (natural) {
             assert.match(
               frames

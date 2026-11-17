@@ -119,5 +119,6 @@ pacman:
     - util-linux-libs
     - libsecret
   artifactName: ${name}-linux-${version}-${arch}.pkg.tar.zst
-npmRebuild: true
+# Native modules use Node-API. Preserve node-pty's installed ConPTY support files.
+npmRebuild: false
 publish: []
