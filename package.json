@@ -26,7 +26,7 @@
     "checksum": "node scripts/checksum.ts",
     "telegram": "node scripts/telegram.ts",
     "dev": "pnpm run ensure:electron && electron-vite dev",
-    "postinstall": "pnpm run ensure:electron && electron-builder install-app-deps",
+    "postinstall": "pnpm run ensure:electron",
     "build:win": "electron-vite build && electron-builder --publish never --win",
     "build:mac": "electron-vite build && electron-builder --publish never --mac",
     "build:linux": "electron-vite build && node scripts/package-linux.ts"
