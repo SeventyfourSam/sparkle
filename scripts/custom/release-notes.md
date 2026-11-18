@@ -2,7 +2,7 @@
 
 - Codex / Claude Web 源码和程序已迁移为独立 AgentServer。Sparkle 设置中可选择外部程序、配置本机接入端口与网页端口，并管理自动启动、重启及退出清理；安装包不再内嵌 Web 服务。
 - AgentServer 启用时自动轻量模式保留托盘，使网页服务持续可用；进程异常退出会有限次退避重试，启动失败可在设置中查看。
-- 修复 macOS Electron 安装时 Framework 软链接被错误解压的问题，改用 Electron 自身使用的 ZIP 解压器。
+- 修复 macOS Electron 安装时 Framework 软链接被错误解压的问题，改用 macOS 系统 ZIP 解压器。
 
 ### 已有 Custom 功能
 

@@ -1,7 +1,9 @@
+import AdmZip from 'adm-zip'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { createRequire } from 'module'
+import { execFileSync } from 'node:child_process'
 
 const require = createRequire(import.meta.url)
 const electronPackagePath = require.resolve('electron/package.json')
@@ -19,10 +21,6 @@ const { downloadArtifact } = electronRequire('@electron/get') as {
     arch: string
   }) => Promise<string>
 }
-const extractZip = electronRequire('extract-zip') as (
-  file: string,
-  options: { dir: string }
-) => Promise<void>
 
 const platform =
   process.env.ELECTRON_INSTALL_PLATFORM || process.env.npm_config_platform || os.platform()
@@ -105,8 +103,12 @@ async function main(): Promise<void> {
   fs.rmSync(distPath, { recursive: true, force: true })
   fs.mkdirSync(distPath, { recursive: true })
 
-  // Electron's own extractor preserves framework symlinks and executable modes.
-  await extractZip(zipPath, { dir: distPath })
+  if (process.platform === 'darwin') {
+    // Native macOS extraction preserves framework symlinks and executable modes.
+    execFileSync('/usr/bin/ditto', ['-x', '-k', zipPath, distPath])
+  } else {
+    new AdmZip(zipPath).extractAllTo(distPath, true)
+  }
 
   const srcTypeDefPath = path.join(distPath, 'electron.d.ts')
   const targetTypeDefPath = path.join(electronDir, 'electron.d.ts')

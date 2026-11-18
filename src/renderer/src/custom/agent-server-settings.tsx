@@ -56,7 +56,7 @@ export default function AgentServerSettings(): React.JSX.Element {
   }
   return (
     <SettingCard header="AgentServer">
-      <SettingItem title="随 Sparkle 自动启动" divider>
+      <SettingItem title="自动启动" divider>
         <Switch
           size="sm"
           aria-label="随 Sparkle 自动启动 AgentServer"
