@@ -4,6 +4,7 @@ import { once } from 'node:events'
 import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import net from 'node:net'
+import dgram from 'node:dgram'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -14,13 +15,38 @@ import type { PreparedProfile } from './profile-builder'
 
 const binary = path.resolve(`extra/sidecar/mihomo${process.platform === 'win32' ? '.exe' : ''}`)
 
-async function listen(server: net.Server): Promise<number> {
-  server.listen(0, '127.0.0.1')
+async function listen(server: net.Server, port = 0): Promise<number> {
+  server.listen(port, '127.0.0.1')
   await once(server, 'listening')
   return (server.address() as net.AddressInfo).port
 }
 
-async function availablePort(): Promise<number> {
+async function availablePort(withUdp = false): Promise<number> {
+  if (withUdp) {
+    // Windows can reserve a port for UDP while allowing TCP on the same number.
+    // Pick with UDP first, then verify TCP before giving both sockets to Mihomo.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const udp = dgram.createSocket('udp4')
+      const tcp = net.createServer()
+      try {
+        udp.bind(0, '127.0.0.1')
+        await once(udp, 'listening')
+        const port = udp.address().port
+        await listen(tcp, port)
+        return port
+      } catch (error) {
+        if (attempt === 19) throw error
+      } finally {
+        if (tcp.listening) await new Promise<void>((resolve) => tcp.close(() => resolve()))
+        try {
+          await new Promise<void>((resolve) => udp.close(() => resolve()))
+        } catch {
+          /* Bind failed. */
+        }
+      }
+    }
+    throw new Error('No shared TCP/UDP test port available')
+  }
   const server = net.createServer()
   const port = await listen(server)
   await new Promise<void>((resolve, reject) => {
@@ -51,7 +77,7 @@ test(
     })
     const echoPort = await listen(echo)
     const controllerPort = await availablePort()
-    const mixedPort = await availablePort()
+    const mixedPort = await availablePort(true)
     const config = {
       'mixed-port': mixedPort,
       'external-controller': `127.0.0.1:${controllerPort}`,
