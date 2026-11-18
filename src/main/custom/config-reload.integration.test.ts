@@ -21,7 +21,7 @@ async function listen(server: net.Server, port = 0): Promise<number> {
   return (server.address() as net.AddressInfo).port
 }
 
-async function availablePort(withUdp = false): Promise<number> {
+async function availablePort(withUdp = false, exclude: number[] = []): Promise<number> {
   if (withUdp) {
     // Windows can reserve a port for UDP while allowing TCP on the same number.
     // Pick with UDP first, then verify TCP before giving both sockets to Mihomo.
@@ -32,6 +32,7 @@ async function availablePort(withUdp = false): Promise<number> {
         udp.bind(0, '127.0.0.1')
         await once(udp, 'listening')
         const port = udp.address().port
+        if (exclude.includes(port)) continue
         await listen(tcp, port)
         return port
       } catch (error) {
@@ -77,7 +78,7 @@ test(
     })
     const echoPort = await listen(echo)
     const controllerPort = await availablePort()
-    const mixedPort = await availablePort(true)
+    const mixedPort = await availablePort(true, [controllerPort])
     const config = {
       'mixed-port': mixedPort,
       'external-controller': `127.0.0.1:${controllerPort}`,
