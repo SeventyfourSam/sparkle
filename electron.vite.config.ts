@@ -21,12 +21,6 @@ export default defineConfig({
   main: {
     define: buildDefines,
     build: {
-      rollupOptions: {
-        input: {
-          index: resolve('src/main/index.ts'),
-          'claude-channel': resolve('src/main/custom/claude-channel/entry.ts')
-        }
-      },
       externalizeDeps: {
         exclude: ['age-encryption']
       }
@@ -43,7 +37,6 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve('src/renderer/index.html'),
-          codex: resolve('src/renderer/codex.html'),
           floating: resolve('src/renderer/floating.html'),
           traymenu: resolve('src/renderer/traymenu.html')
         }

@@ -26,7 +26,7 @@ import { handleDeepLink } from './resolve/deepLink'
 import { initAppQuitLifecycle } from './resolve/appLifecycle'
 import { showNotification } from './utils/notification'
 import { appendAppLog } from './utils/log'
-import { keepCodexWebAlive } from './custom/codex-web/manager'
+import { agentServerEnabled } from './custom/agent-server/manager'
 
 export { setNotQuitDialog } from './resolve/appLifecycle'
 
@@ -76,7 +76,7 @@ async function scheduleLightweightMode(): Promise<void> {
   }
 
   const enterLightweightMode = async (): Promise<void> => {
-    const mode = keepCodexWebAlive() ? 'tray' : autoLightweightMode
+    const mode = agentServerEnabled() ? 'tray' : autoLightweightMode
     if (mode === 'core') {
       await quitWithoutCore()
     } else if (mode === 'tray') {

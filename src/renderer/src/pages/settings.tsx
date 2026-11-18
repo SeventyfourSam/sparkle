@@ -13,7 +13,7 @@ import SiderConfig from '@renderer/components/settings/sider-config'
 import SubStoreConfig from '@renderer/components/settings/substore-config'
 import AppearanceConfig from '@renderer/components/settings/appearance-confis'
 import WebhookConfigPanel from '@renderer/components/settings/webhook-config'
-import CodexWebSettings from '@renderer/custom/codex-web-settings'
+import AgentServerSettings from '@renderer/custom/agent-server-settings'
 
 const Settings: React.FC = () => {
   return (
@@ -63,7 +63,7 @@ const Settings: React.FC = () => {
       <GeneralConfig />
       <AppearanceConfig />
       <SubStoreConfig />
-      <CodexWebSettings />
+      <AgentServerSettings />
       <SiderConfig />
       <WebdavConfig />
       <WebhookConfigPanel />

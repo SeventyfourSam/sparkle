@@ -1,7 +1,5 @@
 appId: sparkle.app
 productName: Sparkle
-asarUnpack:
-  - '**/node_modules/node-pty/**'
 directories:
   buildResources: build
 files:
@@ -119,6 +117,5 @@ pacman:
     - util-linux-libs
     - libsecret
   artifactName: ${name}-linux-${version}-${arch}.pkg.tar.zst
-# Native modules use Node-API. Preserve node-pty's installed ConPTY support files.
-npmRebuild: false
+npmRebuild: true
 publish: []

@@ -4,6 +4,7 @@ import { stopNetworkDetection } from '../core/network'
 import { disableSysProxySync, triggerSysProxy } from '../sys/sysproxy'
 import { appendAppLog } from '../utils/log'
 import { emitWebhook, flushWebhooks } from './webhook'
+import { stopAgentServer } from '../custom/agent-server/manager'
 
 interface AppQuitLifecycleContext {
   getMainWindow: () => BrowserWindow | null
@@ -71,6 +72,7 @@ async function cleanupBeforeExit(useRegistry: boolean): Promise<void> {
   }
 
   await Promise.all([
+    stopAgentServer(),
     (async (): Promise<void> => {
       try {
         await triggerSysProxy(false, false, useRegistry)

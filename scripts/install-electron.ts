@@ -1,4 +1,3 @@
-import AdmZip from 'adm-zip'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -20,6 +19,10 @@ const { downloadArtifact } = electronRequire('@electron/get') as {
     arch: string
   }) => Promise<string>
 }
+const extractZip = electronRequire('extract-zip') as (
+  file: string,
+  options: { dir: string }
+) => Promise<void>
 
 const platform =
   process.env.ELECTRON_INSTALL_PLATFORM || process.env.npm_config_platform || os.platform()
@@ -53,7 +56,16 @@ function isInstalled(): boolean {
     return (
       installedVersion === version &&
       installedPath === platformPath &&
-      fs.existsSync(path.join(distPath, platformPath))
+      fs.existsSync(path.join(distPath, platformPath)) &&
+      (!['darwin', 'mas'].includes(platform) ||
+        fs
+          .lstatSync(
+            path.join(
+              distPath,
+              'Electron.app/Contents/Frameworks/Electron Framework.framework/Electron Framework'
+            )
+          )
+          .isSymbolicLink())
     )
   } catch {
     return false
@@ -93,8 +105,8 @@ async function main(): Promise<void> {
   fs.rmSync(distPath, { recursive: true, force: true })
   fs.mkdirSync(distPath, { recursive: true })
 
-  const zip = new AdmZip(zipPath)
-  zip.extractAllTo(distPath, true)
+  // Electron's own extractor preserves framework symlinks and executable modes.
+  await extractZip(zipPath, { dir: distPath })
 
   const srcTypeDefPath = path.join(distPath, 'electron.d.ts')
   const targetTypeDefPath = path.join(electronDir, 'electron.d.ts')

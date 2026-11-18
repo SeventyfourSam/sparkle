@@ -44,7 +44,7 @@ import { startSSIDCheck } from '../sys/ssid'
 import { startNetworkDetection } from '../core/manager'
 import { initKeyManager } from '../service/manager'
 import { appendAppLog } from './log'
-import { initCodexWeb } from '../custom/codex-web/manager'
+import { initAgentServer } from '../custom/agent-server/manager'
 
 async function initDirs(): Promise<void> {
   if (!existsSync(dataDir())) {
@@ -218,11 +218,11 @@ function runBackgroundInitTask(name: string, task: Promise<void>): void {
 
 function startBackgroundInit(appConfig: AppConfig): void {
   const { sysProxy, onlyActiveDevice = false, networkDetection = false } = appConfig
+  runBackgroundInitTask('agent server', initAgentServer())
 
   runBackgroundInitTask('substore frontend', startSubStoreFrontendServer())
   runBackgroundInitTask('substore backend', startSubStoreBackendServer())
   runBackgroundInitTask('ssid check', startSSIDCheck())
-  runBackgroundInitTask('codex web', initCodexWeb())
 
   if (networkDetection) {
     runBackgroundInitTask('network detection', startNetworkDetection())
